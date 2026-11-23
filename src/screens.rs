@@ -293,10 +293,19 @@ pub fn set_listed(names: BTreeSet<String>) -> Vec<String> {
     if was == names {
         return Vec::new();
     }
-    // One that left the list closes, unless it was also made on the fly.
-    let held = read();
-    for gone in was.difference(&names).filter(|n| is_open(n) && !held.get(*n).is_some_and(|h| h.adhoc)) {
-        request_to(gone, Request::Run { name: "window.close".into(), args: Value::Null });
+    // One that left the list closes and its spaces join main, unless it was
+    // also made on the fly.
+    let mut held = read();
+    let gone: Vec<String> = was.difference(&names).filter(|n| !held.get(*n).is_some_and(|h| h.adhoc)).cloned().collect();
+    let mut handed = false;
+    for name in &gone {
+        handed |= hand_to_main(&mut held, name);
+        if is_open(name) {
+            request_to(name, Request::Run { name: "window.close".into(), args: Value::Null });
+        }
+    }
+    if handed {
+        write(&held);
     }
     request_all(|| Request::Screens);
     names.difference(&was).cloned().collect()
@@ -485,11 +494,29 @@ pub fn forget(name: &str) -> Result<(), String> {
     if listed().contains(name) {
         return Err(format!("window {name} is listed in settings.json windows; take it out there"));
     }
-    if held.remove(name).is_none() && !is_open(name) {
+    if !hand_to_main(&mut held, name) && !is_open(name) {
         return Err(format!("no window {name}"));
     }
     write(&held);
     Ok(())
+}
+
+/// A forgotten window's spaces and tabs go to main's lists (placed, not
+/// up for grabs). False when it had no entry.
+fn hand_to_main(held: &mut Screens, name: &str) -> bool {
+    let Some(gone) = held.remove(name) else { return false };
+    let main = held.entry(MAIN.to_owned()).or_default();
+    for s in gone.spaces {
+        if !main.spaces.contains(&s) {
+            main.spaces.push(s);
+        }
+    }
+    for t in gone.tabs {
+        if !main.tabs.contains(&t) {
+            main.tabs.push(t);
+        }
+    }
+    true
 }
 
 /// Where a request goes. A mod's goes to its own window; `herdr-app do` to
@@ -761,6 +788,17 @@ mod tests {
         }
         // A second launch brings up the window used last.
         assert_eq!(go(json!({ "raise": true })), Ok("left".into()));
+    }
+
+    #[test]
+    fn a_forgotten_windows_spaces_and_tabs_go_to_main() {
+        let mut h = held(json!({
+            "zed": { "spaces": ["beta", "alpha"], "tabs": ["box/g1"], "adhoc": true, "closed": true },
+            "main": { "spaces": ["alpha"] },
+        }));
+        assert!(hand_to_main(&mut h, "zed"));
+        assert_eq!(serde_json::to_value(&h).unwrap(), json!({ "main": { "spaces": ["alpha", "beta"], "tabs": ["box/g1"] } }));
+        assert!(!hand_to_main(&mut h, "zed"));
     }
 
     #[test]

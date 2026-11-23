@@ -7,6 +7,8 @@ use serde_json::{Value, json};
 pub struct Arg {
     pub name: &'static str,
     pub required: bool,
+    /// Required, and "" is a value (`window.move`'s machine id: this computer).
+    pub empty: bool,
 }
 
 pub struct Command {
@@ -16,11 +18,16 @@ pub struct Command {
 }
 
 const fn req(name: &'static str) -> Arg {
-    Arg { name, required: true }
+    Arg { name, required: true, empty: false }
+}
+
+/// Required, but may be "".
+const fn req_or_empty(name: &'static str) -> Arg {
+    Arg { name, required: true, empty: true }
 }
 
 const fn opt(name: &'static str) -> Arg {
-    Arg { name, required: false }
+    Arg { name, required: false, empty: false }
 }
 
 const fn cmd(name: &'static str, args: &'static [Arg], about: &'static str) -> Command {
@@ -104,7 +111,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("window.close", &[opt("name")], "Close a Herdr window (default: this one). Closing main quits Herdr (every window); another's spaces show in main until it opens again."),
     cmd("window.new", &[req("name"), opt("focus")], "Open another Herdr window (one process, one home) by name, or bring it to the front if open (focus false: don't). A name not in settings.json `windows` is kept until window.forget. Its title is `Herdr · <name>`."),
     cmd("window.forget", &[req("name")], "Forget a window made on the fly (closing it if open): its spaces and tabs show in main."),
-    cmd("window.move", &[req("kind"), req("id"), req("to"), opt("index")], "Show a space (kind \"space\", with its tabs), a tab (\"tab\", alone: it stays in its space) or the spaces of a machine this window shows (\"machine\", id \"\" for this computer) in window `to`, at position index (1 = first) among what `to` shows there. Nothing restarts."),
+    cmd("window.move", &[req("kind"), req_or_empty("id"), req("to"), opt("index")], "Show a space (kind \"space\", with its tabs), a tab (\"tab\", alone: it stays in its space) or the spaces of a machine this window shows (\"machine\", id \"\" for this computer) in window `to`, at position index (1 = first) among what `to` shows there. Nothing restarts."),
     cmd("window.raise", &[req("name")], "Bring an open Herdr window to the front."),
     cmd("window.minimize", &[], "Minimize the window."),
     cmd("window.maximize", &[], "Maximize the window, or back."),
@@ -149,11 +156,11 @@ pub fn validate_args(c: &Command, args: &Value) -> Result<(), String> {
 
 /// The first required argument that's missing (an empty string counts as missing).
 pub fn missing(c: &Command, args: &Value) -> Option<&'static str> {
-    c.args.iter().filter(|a| a.required).map(|a| a.name).find(|k| match args.get(k) {
+    c.args.iter().filter(|a| a.required).find(|a| match args.get(a.name) {
         None | Some(Value::Null) => true,
-        Some(Value::String(s)) => s.trim().is_empty(),
+        Some(Value::String(s)) => s.trim().is_empty() && !a.empty,
         _ => false,
-    })
+    }).map(|a| a.name)
 }
 
 /// The list as data, for `herdr-app commands` and mods.
@@ -228,5 +235,10 @@ mod tests {
         assert_eq!(missing(move_, &json!({ "id": "sp1", "index": 1 })), None);
         // Names are optional: none is Herdr's automatic one.
         assert_eq!(missing(find("space.new").unwrap(), &json!({})), None);
+        // "" is this computer, a machine id like any other.
+        let move_window = find("window.move").unwrap();
+        assert_eq!(missing(move_window, &json!({ "kind": "machine", "id": "", "to": "left" })), None);
+        assert_eq!(missing(move_window, &json!({ "kind": "machine", "to": "left" })), Some("id"));
+        assert_eq!(missing(move_window, &json!({ "kind": "space", "id": "sp1", "to": "" })), Some("to"));
     }
 }
