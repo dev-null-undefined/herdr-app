@@ -109,7 +109,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("app.hide_others", &[], "Hide other apps (macOS)."),
     cmd("app.show_all", &[], "Show all apps (macOS)."),
     cmd("window.close", &[opt("name")], "Close a Herdr window (default: this one). Closing main quits Herdr (every window); another's spaces show in main until it opens again."),
-    cmd("window.new", &[req("name"), opt("focus")], "Open another Herdr window (one process, one home) by name, or bring it to the front if open (focus false: don't). A name not in settings.json `windows` is kept until window.forget. Its title is `Herdr · <name>`."),
+    cmd("window.new", &[req("name"), opt("focus")], "Open another Herdr window (one process, one home) by name, or bring it to the front if open (focus false: don't). A name not in settings.json `windows` is kept until window.forget. Its title is `Herdr · <name>` (main's stays `Herdr`)."),
     cmd("window.forget", &[req("name")], "Forget a window made on the fly (closing it if open): its spaces and tabs show in main."),
     cmd("window.move", &[req("kind"), req_or_empty("id"), req("to"), opt("index")], "Show a space (kind \"space\", with its tabs), a tab (\"tab\", alone: it stays in its space) or the spaces of a machine this window shows (\"machine\", id \"\" for this computer) in window `to`, at position index (1 = first) among what `to` shows there. Nothing restarts."),
     cmd("window.raise", &[req("name")], "Bring an open Herdr window to the front."),

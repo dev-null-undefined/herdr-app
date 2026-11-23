@@ -426,9 +426,10 @@ fn options(name: &str, cx: &App) -> gpui::WindowOptions {
     }
 }
 
-/// `Herdr · <name>`: window rules (Hyprland's) place each window by it.
+/// Main's title stays `Herdr`, as before there were windows; another's is
+/// `Herdr · <name>`. Window rules (Hyprland's) place each window by it.
 pub fn title(name: &str) -> String {
-    format!("Herdr · {name}")
+    if name == MAIN { "Herdr".into() } else { format!("Herdr · {name}") }
 }
 
 /// Opens window `name` (`window.new`), or does nothing if it's open. A name
@@ -810,6 +811,12 @@ mod tests {
         assert!(hand_to_main(&mut h, "zed"));
         assert_eq!(serde_json::to_value(&h).unwrap(), json!({ "main": { "spaces": ["alpha", "beta"], "tabs": ["box/g1"] } }));
         assert!(!hand_to_main(&mut h, "zed"));
+    }
+
+    #[test]
+    fn main_keeps_the_stock_title_and_others_are_named() {
+        assert_eq!(title("main"), "Herdr");
+        assert_eq!(title("left"), "Herdr · left");
     }
 
     #[test]

@@ -53,8 +53,9 @@ Usage:
   herdr-app commands               every command, its arguments, what it does
   herdr-app status                 what the window shows, and any errors
   herdr-app shot [file.png]        save the last window frame (default: herdr-shot.png)
-  --window <name>                  (ls, do, status, shot) that Herdr window, not the default:
-                                   main for status and shot; for do, the window showing
+  herdr-app ls|do|status|shot ... --window <name>
+                                   that Herdr window, not the default: main for ls,
+                                   status and shot; for do, the window showing
                                    $HC_TERMINAL_ID's tab, else the focused one
   herdr-app check <mod folder>     load a mod once and report what's wrong
   herdr-app --skill                Agent Skill: driving the window, and where hc fits

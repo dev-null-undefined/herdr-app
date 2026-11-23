@@ -173,7 +173,7 @@ One Herdr can show several windows (one per monitor, say), each listing only
 its own spaces. `main` is the first and always open; closing it quits Herdr.
 Others are listed in settings.json `windows` (they open at every start) or
 made on the fly with `window.new {name}` (kept, closed or not, until
-`window.forget`). Each title is `Herdr · <name>`, so window rules can place it;
+`window.forget`). Main's title is `Herdr`, another's `Herdr · <name>`, so window rules can place each;
 the app id stays `herdr-app`.
 
 - Who shows what is shared.json `screens`:

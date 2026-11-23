@@ -563,7 +563,7 @@ Close a Herdr window (default: this one). Closing main quits Herdr (every window
 
 ## `window.new`
 
-Open another Herdr window (one process, one home) by name, or bring it to the front if open (focus false: don't). A name not in settings.json `windows` is kept until window.forget. Its title is `Herdr · <name>`.
+Open another Herdr window (one process, one home) by name, or bring it to the front if open (focus false: don't). A name not in settings.json `windows` is kept until window.forget. Its title is `Herdr · <name>` (main's stays `Herdr`).
 
 | Argument | Required |
 |---|---|
