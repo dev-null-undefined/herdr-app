@@ -239,6 +239,14 @@ impl AppWindow {
         }
     }
 
+    /// Every other open window shows this window's layout; `fresh`: from no
+    /// clicks (after a reset removed them).
+    pub(super) fn relayout_others(&self, fresh: bool) {
+        for other in screens::open_names().into_iter().filter(|n| *n != self.name) {
+            screens::request_to(&other, Request::Layout { name: self.layout_name.clone(), fresh });
+        }
+    }
+
     /// Brings a window to the front (this one directly: it's being updated).
     pub(super) fn raise(&self, name: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if name == self.name {

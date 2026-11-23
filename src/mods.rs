@@ -397,8 +397,9 @@ pub enum Request {
     To { window: String, request: Box<Request> },
     /// Who shows which space or tab changed (shared.json `screens`): every window takes its share again.
     Screens,
-    /// Another window switched the layout (every window shows the same one).
-    Layout { name: String },
+    /// Another window switched the layout (every window shows the same one);
+    /// `fresh`: it was reset, so this window's clicks are gone too.
+    Layout { name: String, fresh: bool },
     /// Another window changed the look (a theme pick, a text size): the look is
     /// the whole app's. The layout root's `look`, and the theme pick among the clicks.
     Look { look: Value, pick: Value },

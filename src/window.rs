@@ -1099,7 +1099,8 @@ impl AppWindow {
         self.focused_pane = None;
         self.agent_focused = None;
         self.sync(window, cx);
-        if other {
+        // Kept overlay windows are main's (every window switches with it).
+        if other && self.is_main() {
             self.open_kept_windows(window, cx);
         }
     }
@@ -3383,10 +3384,7 @@ impl AppWindow {
             "layout.switch" => {
                 self.switch_layout(Self::arg(a, "name"), window, cx);
                 // Every window shows the same layout.
-                let name = self.layout_name.clone();
-                for other in crate::screens::open_names().into_iter().filter(|n| *n != self.name) {
-                    crate::screens::request_to(&other, Request::Layout { name: name.clone() });
-                }
+                self.relayout_others(false);
                 return;
             }
             "layout.clone" => {
@@ -3480,6 +3478,8 @@ impl AppWindow {
                 if name == self.layout_name {
                     self.load_layout(&name);
                     self.apply_look(window, cx);
+                    // Every window shows it: they start over from no clicks too.
+                    self.relayout_others(true);
                 }
             }
             "layout.select" => {
@@ -3854,7 +3854,10 @@ impl AppWindow {
 
     /// Closes an overlay; a kept window stays closed on the next start too.
     fn close_overlay(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(k) = self.overlays.iter().find(|o| o.id == id).and_then(|o| o.key.clone()) {
+        // Only main keeps windows open for the next start, so only its close forgets one.
+        if let Some(k) = self.overlays.iter().find(|o| o.id == id).and_then(|o| o.key.clone())
+            && self.is_main()
+        {
             movable::forget(&self.layout_name, &k);
         }
         self.remove_overlay(id, window, cx);
@@ -3907,6 +3910,7 @@ impl AppWindow {
         }
         self.show_layout_notes(window, cx);
         self.reload_config(window, cx);
+        self.relayout_others(true);
     }
 
     fn handle(&mut self, req: Request, window: &mut Window, cx: &mut Context<Self>) {
@@ -3920,10 +3924,22 @@ impl AppWindow {
             }
             Request::To { request, .. } => self.handle(*request, window, cx),
             Request::Screens => self.screens_changed(window, cx),
-            Request::Layout { name } => {
+            Request::Layout { name, fresh: false } => {
                 if name != self.layout_name {
                     self.switch_layout(Some(&name), window, cx);
                 }
+            }
+            // A reset elsewhere: this window's clicks are gone too, never written back.
+            Request::Layout { name, fresh: true } => {
+                if name != self.layout_name {
+                    self.close_windows(window, cx);
+                    self.drop_layout_copies(window, cx);
+                }
+                self.load_layout(&name);
+                self.apply_look(window, cx);
+                self.focused_pane = None;
+                self.agent_focused = None;
+                self.sync(window, cx);
             }
             Request::Look { look, pick } => {
                 let pick: Option<crate::layout::ThemeChoice> = serde_json::from_value(pick).ok().flatten();
