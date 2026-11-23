@@ -196,9 +196,8 @@ pub fn move_to(held: &mut Screens, owners: &Owners, model: &Model, kind: &str, i
         if let Some(h) = held.get_mut(to) {
             h.tabs.retain(|t| !tabs.contains(t));
         }
-        if to != MAIN {
-            held.entry(to.to_owned()).or_default().spaces.push(space);
-        }
+        // Main's list too: only a space nobody placed is in no list.
+        held.entry(to.to_owned()).or_default().spaces.push(space);
     }
     Ok(())
 }
@@ -220,17 +219,15 @@ pub fn claim(held: &mut Screens, owners: &Owners, model: &Model, space: &str, ta
             }
             true
         }
-        // A new space (or its first tab).
+        // A new space (or its first tab): in its window's list, main's too.
         _ => {
-            if owners.space(space) == me {
+            if held.get(me).is_some_and(|h| h.spaces.iter().any(|s| s == space)) {
                 return false;
             }
             for h in held.values_mut() {
                 h.spaces.retain(|s| s != space);
             }
-            if me != MAIN {
-                held.entry(me.to_owned()).or_default().spaces.push(space.to_owned());
-            }
+            held.entry(me.to_owned()).or_default().spaces.push(space.to_owned());
             true
         }
     }
@@ -320,7 +317,8 @@ pub fn note_focus(name: &str, active: bool) {
         });
     }
     if focused() != before {
-        request_all(|| Request::Refresh);
+        // Republished in every window's screens().
+        request_all(|| Request::Screens);
     }
 }
 
@@ -673,10 +671,11 @@ mod tests {
         let o = Owners::new(h.clone(), open.clone(), set(&[]));
         move_to(&mut h, &o, &m, "tab", "a1", "left", "main").unwrap();
         assert!(h["main"].tabs.is_empty());
-        // Back to main: no list holds it.
+        // Back to main: main's list holds it, no other.
         let o = Owners::new(h.clone(), open.clone(), set(&[]));
         move_to(&mut h, &o, &m, "space", "alpha", "main", "left").unwrap();
-        assert!(h.values().all(|w| !w.spaces.contains(&"alpha".to_owned())));
+        assert_eq!(h["main"].spaces, vec!["alpha"]);
+        assert!(h.iter().all(|(n, w)| n == "main" || !w.spaces.contains(&"alpha".to_owned())));
         // A machine: the spaces of it the window running the move shows, once.
         let mut h = held(json!({ "left": { "spaces": ["beta"], "adhoc": true } }));
         let o = Owners::new(h.clone(), open.clone(), set(&[]));
@@ -702,7 +701,10 @@ mod tests {
         let o = Owners::new(h.clone(), open.clone(), set(&[]));
         assert!(claim(&mut h, &o, &m, "delta", None, "left"));
         assert_eq!(h["left"].spaces, vec!["delta"]);
-        // Made from main: nothing to note.
+        // Made from main: in main's list (only one nobody placed is in none), once.
+        let o = Owners::new(h.clone(), open.clone(), set(&[]));
+        assert!(claim(&mut h, &o, &m, "beta", None, "main"));
+        assert_eq!(h["main"].spaces, vec!["beta"]);
         let o = Owners::new(h.clone(), open.clone(), set(&[]));
         assert!(!claim(&mut h, &o, &m, "beta", None, "main"));
         // A new tab from left in main's alpha is pulled out to left.

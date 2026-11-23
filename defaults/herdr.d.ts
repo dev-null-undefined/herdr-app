@@ -266,9 +266,12 @@ export function window(): {
  *  settings.json `windows` (`kind: "listed"`), and those made on the fly with
  *  `window.new` (`"adhoc"`, kept until `window.forget`), open or closed. `spaces`
  *  and `tabs` are what each holds (space ids as `spaces()` has them, tab ids); they
- *  stay while it's closed. A space in no list, or held by a window that isn't
- *  `open`, shows in main; a tab in no list shows where its space does (a tab in a
- *  list was pulled out of its space). `focused`: the window used last. Main first. Live. */
+ *  stay while it's closed. Every space placed in a window is in its list, main's
+ *  too; one nobody placed is in none. A space in no list, or held by a window that
+ *  isn't `open`, shows in main; a tab in no list shows where its space does (a tab
+ *  in a list was pulled out of its space). `focused`: the window focused now, else
+ *  the one focused last. Main first. Live. A copy outside main also finds
+ *  `window: "<name>"` in its `props()`. */
 export function screens(): {
   name: string;
   main: boolean;

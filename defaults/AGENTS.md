@@ -178,7 +178,9 @@ the app id stays `herdr-app`.
 
 - Who shows what is shared.json `screens`:
   `{ "left": { "spaces": ["sp1", "box/sp2"], "tabs": ["tb7"], "adhoc": true, "closed": true } }`.
-  A space in no list, or held by a window that isn't open, shows in main. A tab
+  Every space a window made or was given is in its list, main's too; one
+  nobody placed (a labelled terminal whose parent shows in no window) is in
+  none, and shows in main, as does one held by a window that isn't open. A tab
   in no list shows where its space does; a listed tab was pulled out of its
   space and shows alone in that window (its space stays where it is).
   `window.move {kind: "space" | "tab" | "machine", id, to, index?}` changes it;
