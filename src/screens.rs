@@ -133,6 +133,11 @@ impl Owners {
 /// Keeps a window's selection on what it shows: its active space one it
 /// shows, each such space's active tab one of its own. Returns whether it changed.
 pub fn keep_view(model: &mut Model, owners: &Owners, me: &str) -> bool {
+    // Alone, a window shows everything: its selection stays as it always was
+    // (none selected included).
+    if owners.open.iter().all(|n| n == me) {
+        return false;
+    }
     let mut changed = false;
     let shown: Vec<String> = owners.spaces_of(model, me).into_iter().map(str::to_owned).collect();
     for p in model.spaces.iter_mut().filter(|p| shown.contains(&p.id)) {
@@ -675,6 +680,12 @@ mod tests {
         let mut right = model();
         assert!(keep_view(&mut right, &o, "right"));
         assert_eq!(right.active, None);
+        // Main alone keeps its selection as before windows, none selected included.
+        let alone = Owners::new(held(json!({ "left": { "spaces": ["beta"], "adhoc": true } })), set(&["main"]), set(&[]));
+        let mut main = model();
+        main.active = None;
+        assert!(!keep_view(&mut main, &alone, "main"));
+        assert_eq!(main.active, None);
     }
 
     #[test]
