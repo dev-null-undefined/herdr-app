@@ -209,6 +209,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn window_is_a_client_flag_anywhere_after_the_verb() {
+        let s = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(take_window(&s(&["status", "--window", "left"])).unwrap(), (s(&["status"]), Some("left".into())));
+        assert_eq!(take_window(&s(&["do", "space.new", "--name", "x", "--window", "left"])).unwrap(), (s(&["do", "space.new", "--name", "x"]), Some("left".into())));
+        assert_eq!(take_window(&s(&["shot", "--window", "left", "a.png"])).unwrap(), (s(&["shot", "a.png"]), Some("left".into())));
+        assert_eq!(take_window(&s(&["ls"])).unwrap(), (s(&["ls"]), None));
+        assert!(take_window(&s(&["status", "--window"])).is_err());
+    }
+
+    #[test]
     fn a_second_launch_raises_the_running_window() {
         let dir = std::env::temp_dir().join(format!("herdr-app-raise-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

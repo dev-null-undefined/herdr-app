@@ -6122,6 +6122,82 @@ export default class SystemToast extends View {
     }
 
     #[test]
+    fn each_window_attaches_and_rings_for_what_it_shows() {
+        in_own_process("two_windows");
+    }
+
+    #[gpui::test]
+    fn two_windows(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("two_windows") {
+            return;
+        }
+        // The test's own process: nothing else reads the environment now.
+        unsafe { std::env::set_var("HERDR_APP_NO_SOUND", "1") };
+        let layout = json!({ "id": "root", "type": "row", "children": [{ "id": "work", "type": "block", "content": { "tab": "active" } }] });
+        let (main, cx) = open_window(cx, "noop", "", layout);
+        crate::screens::note_open("main");
+        crate::screens::note_open("left");
+        let (_tx, rx) = async_channel::unbounded();
+        let left = cx.cx.open_window(gpui::size(gpui::px(800.0), gpui::px(600.0)), |window, cx| super::AppWindow::new(crate::hc::offline(), "left".into(), rx, window, cx));
+        crate::mods::set_shared("screens".into(), json!({ "left": { "spaces": ["beta"], "adhoc": true } }));
+        // Two screens of one home: the same spaces, an agent in each.
+        let seed = |this: &mut super::AppWindow, word: &str, turn: u64| {
+            if this.model.space("alpha").is_none() {
+                this.model.add_space("alpha", "alpha", "/tmp", super::Tab::new("a1", "", "pa1", "t1"));
+                this.model.add_space("beta", "beta", "/tmp", super::Tab::new("b1", "", "pb1", "t2"));
+            }
+            for t in ["t1", "t2"] {
+                this.live.insert(t.into(), json!({ "address": t, "status": word, "turn": turn }));
+            }
+            this.listed_once = true;
+            // Nobody looking: a finish rings.
+            this.window_active = false;
+        };
+        let attached = |this: &super::AppWindow| {
+            let mut a: Vec<String> = this.terms.values().map(|t| t.address.clone()).collect();
+            a.sort();
+            a
+        };
+        let toasts = |this: &super::AppWindow| -> Vec<String> {
+            this.overlays.iter().filter(|o| o.kind == super::OverlayKind::Toast)
+                .filter_map(|o| this.copies.get(&o.slot)?.inst.props.pointer("/action/args/terminal")?.as_str().map(str::to_owned))
+                .collect()
+        };
+        let tend = |word: &str, turn: u64, cx: &mut gpui::VisualTestContext| {
+            main.update_in(cx, |this, window, cx| {
+                seed(this, word, turn);
+                this.sync(window, cx);
+                this.tend_terminals(true, window, cx);
+            });
+            left.update(&mut cx.cx, |this, window, cx| {
+                seed(this, word, turn);
+                this.sync(window, cx);
+                this.tend_terminals(true, window, cx);
+            }).unwrap();
+        };
+        tend("working", 1, cx);
+        // Each attaches (and sizes) only its own tab's terminal, and selects only what it shows.
+        assert_eq!(main.update(cx, |this, _| (attached(this), this.model.active.clone())), (vec!["t1".to_owned()], Some("alpha".to_owned())));
+        assert_eq!(left.update(&mut cx.cx, |this, _, _| (attached(this), this.model.active.clone())).unwrap(), (vec!["t2".to_owned()], Some("beta".to_owned())));
+        // Both agents finish: each window toasts for its own, once in all.
+        tend("done", 2, cx);
+        assert_eq!(main.update(cx, |this, _| toasts(this)), vec!["t1"]);
+        assert_eq!(left.update(&mut cx.cx, |this, _, _| toasts(this)).unwrap(), vec!["t2"]);
+        // agent.next walks this window's agents only.
+        assert_eq!(left.update(&mut cx.cx, |this, _, _| this.agent_order()).unwrap(), vec!["t2"]);
+        // alpha moves to left: main lets go of its terminal, left takes it; nothing restarts.
+        crate::mods::set_shared("screens".into(), json!({ "left": { "spaces": ["beta", "alpha"], "adhoc": true } }));
+        main.update_in(cx, |this, window, cx| this.screens_changed(window, cx));
+        left.update(&mut cx.cx, |this, window, cx| this.screens_changed(window, cx)).unwrap();
+        assert_eq!(main.update(cx, |this, _| (attached(this), this.model.active.clone())), (vec![], None));
+        assert_eq!(left.update(&mut cx.cx, |this, _, _| attached(this)).unwrap(), vec!["t1", "t2"]);
+        // Showing what left shows, from main, runs in left.
+        let reply = main.update_in(cx, |this, window, cx| this.run_as("space.select", json!({ "id": "alpha" }), false, window, cx));
+        assert_eq!(reply["window"], "left");
+    }
+
+    #[test]
     fn docking_keeps_the_layouts_notification_and_menu_mods() {
         in_own_process("dock_root_choices");
     }
