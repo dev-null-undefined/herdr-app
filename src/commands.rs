@@ -111,7 +111,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("window.close", &[opt("name")], "Close a Herdr window (default: this one). Closing main quits Herdr (every window; on macOS it closes only main, as before); another's spaces show in main until it opens again."),
     cmd("window.new", &[req("name"), opt("focus")], "Open another Herdr window (one process, one home) by name, or bring it to the front if open (focus false: don't). A name not in settings.json `windows` is kept until window.forget. Its title is `Herdr · <name>` (main's stays `Herdr`)."),
     cmd("window.forget", &[req("name")], "Forget a window made on the fly (closing it if open): its spaces and tabs show in main."),
-    cmd("window.move", &[req("kind"), req_or_empty("id"), req("to"), opt("index")], "Show a space (kind \"space\", with its tabs), a tab (\"tab\", alone: it stays in its space) or the spaces of a machine this window shows (\"machine\", id \"\" for this computer) in window `to`, at position index (1 = first) among what `to` shows there. Nothing restarts."),
+    cmd("window.move", &[req("kind"), req_or_empty("id"), req("to"), opt("index"), opt("from")], "Show a space (kind \"space\", with its tabs), a tab (\"tab\", alone: it stays in its space) or the spaces of a machine (\"machine\", id \"\" for this computer) in window `to`, at position index (1 = first) among what `to` shows there. A machine moves what window `from` shows of it (default: this window; run in `to` itself, the one other window showing that machine). Nothing restarts."),
     cmd("window.raise", &[req("name")], "Bring an open Herdr window to the front."),
     cmd("window.minimize", &[], "Minimize the window."),
     cmd("window.maximize", &[], "Maximize the window, or back."),

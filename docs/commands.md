@@ -580,7 +580,7 @@ Forget a window made on the fly (closing it if open): its spaces and tabs show i
 
 ## `window.move`
 
-Show a space (kind "space", with its tabs), a tab ("tab", alone: it stays in its space) or the spaces of a machine this window shows ("machine", id "" for this computer) in window `to`, at position index (1 = first) among what `to` shows there. Nothing restarts.
+Show a space (kind "space", with its tabs), a tab ("tab", alone: it stays in its space) or the spaces of a machine ("machine", id "" for this computer) in window `to`, at position index (1 = first) among what `to` shows there. A machine moves what window `from` shows of it (default: this window; run in `to` itself, the one other window showing that machine). Nothing restarts.
 
 | Argument | Required |
 |---|---|
@@ -588,6 +588,7 @@ Show a space (kind "space", with its tabs), a tab ("tab", alone: it stays in its
 | `id` | yes |
 | `to` | yes |
 | `index` | no |
+| `from` | no |
 
 ## `window.raise`
 

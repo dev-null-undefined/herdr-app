@@ -704,9 +704,10 @@ The main ones:
 - Herdr windows (see Herdr windows): `window.new {name, focus?}` (opens it, or
   brings it to the front unless `focus: false`), `window.raise {name}`,
   `window.forget {name}` (one made on the fly: its spaces show in main),
-  `window.move {kind, id, to, index?}` (a space with its tabs, one tab alone, or
-  the spaces of a machine this window shows, `id: ""` for this computer; `index`:
-  1 = first among what `to` shows there).
+  `window.move {kind, id, to, index?, from?}` (a space with its tabs, one tab
+  alone, or what window `from` shows of a machine, `id: ""` for this computer;
+  `from` defaults to this window, or, run in `to` itself, to the one other window
+  showing that machine; `index`: 1 = first among what `to` shows there).
 
   ```sh
   herdr-app do window.new --name left

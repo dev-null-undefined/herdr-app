@@ -268,7 +268,14 @@ impl AppWindow {
         if !known {
             return Err(format!("no window {to:?}: `window.new {{name: {to:?}}}` makes one"));
         }
-        screens::move_to(&mut held, &owners, &self.model, kind, id, to, &self.name)?;
+        // A machine dropped on the window it goes to (the copy that got the drop runs this):
+        // it comes from the window that shows it, unless `from` says.
+        let from = match Self::arg(a, "from") {
+            Some(f) => f.to_owned(),
+            None if kind == "machine" && to == self.name => screens::machine_source(&owners, &self.model, id, to, &screens::open_names())?,
+            None => self.name.clone(),
+        };
+        screens::move_to(&mut held, &owners, &self.model, kind, id, to, &from)?;
         let index = a.get("index").and_then(Value::as_u64).map(|i| i as usize);
         if let Some(i) = index.filter(|i| *i > 0) {
             let after = Owners::new(held.clone(), screens::open_names().into_iter().collect(), screens::listed());

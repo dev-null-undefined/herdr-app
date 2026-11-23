@@ -244,6 +244,21 @@ pub fn move_to(held: &mut Screens, owners: &Owners, model: &Model, kind: &str, i
     Ok(())
 }
 
+/// Where a machine moved into `to` comes from when nobody said: the one other
+/// open window that shows any of its spaces or tabs.
+pub fn machine_source(owners: &Owners, model: &Model, machine: &str, to: &str, open: &[String]) -> Result<String, String> {
+    let m = (!machine.is_empty()).then_some(machine);
+    let showing: Vec<&String> = open
+        .iter()
+        .filter(|w| *w != to && model.spaces.iter().any(|p| p.machine.as_deref() == m && owners.shows(model, &p.id, w)))
+        .collect();
+    match showing.as_slice() {
+        [one] => Ok(one.to_string()),
+        [] => Err(format!("no other window shows machine {machine:?}")),
+        _ => Err(format!("several windows show machine {machine:?}: say which one with from")),
+    }
+}
+
 /// A space or tab just made in window `me` shows there (`space.new`, `tab.new`,
 /// adoption). Returns whether the owners changed.
 pub fn claim(held: &mut Screens, owners: &Owners, model: &Model, space: &str, tab: Option<&str>, me: &str) -> bool {
@@ -866,6 +881,20 @@ mod tests {
         move_to(&mut h, &after, &m, "machine", "box", "right", "left").unwrap();
         assert_eq!(h["right"].spaces, vec!["box/sp1", "box/sp2"]);
         assert!(h["left"].tabs.is_empty() && h["left"].spaces.is_empty());
+    }
+
+    #[test]
+    fn a_machine_dropped_on_its_window_comes_from_the_one_other_window_showing_it() {
+        let m = model();
+        let open = vec!["main".to_owned(), "left".to_owned(), "right".to_owned()];
+        // left shows beta (this computer); box's gamma is main's.
+        let o = Owners::new(held(json!({ "left": { "spaces": ["beta"], "adhoc": true }, "main": { "spaces": ["alpha", "box/gamma"] } })), open.iter().cloned().collect(), set(&[]));
+        assert_eq!(machine_source(&o, &m, "", "main", &open), Ok("left".into()));
+        assert!(machine_source(&o, &m, "box", "main", &open).unwrap_err().contains("no other window"));
+        assert_eq!(machine_source(&o, &m, "box", "left", &open), Ok("main".into()));
+        // Two others show this computer: ask.
+        let o = Owners::new(held(json!({ "left": { "spaces": ["beta"], "adhoc": true }, "right": { "tabs": ["a2"], "adhoc": true } })), open.iter().cloned().collect(), set(&[]));
+        assert!(machine_source(&o, &m, "", "left", &open).unwrap_err().contains("from"));
     }
 
     #[test]
