@@ -81,6 +81,7 @@ use xkbcommon::xkb::{self, KEYMAP_COMPILE_NO_FLAGS, Keycode};
 
 use super::{
     display::WaylandDisplay,
+    herdr_drag,
     window::{ImeInput, WaylandWindowStatePtr},
 };
 
@@ -414,6 +415,8 @@ struct DragState<DataOffer = wl_data_offer::WlDataOffer, Window = WaylandWindowS
     window: Option<Window>,
     position: Point<Pixels>,
     uri_read_generation: u64,
+    /// HERDR-WINDOWS: what a data drag carries (None: a file drag).
+    data: Option<gpui::ExternalDragData>,
 }
 
 impl<DataOffer, Window> DragState<DataOffer, Window> {
@@ -453,6 +456,7 @@ where
 {
     fn handle_leave(&mut self) -> Option<(Window, PlatformInput)> {
         self.invalidate_uri_read();
+        self.data = None;
         let window = self.window.clone()?;
         let data_offer = self.data_offer.clone()?;
         data_offer.destroy();
@@ -469,11 +473,49 @@ where
         data_offer.destroy();
         self.data_offer = None;
         self.window = None;
+        let position = self.position;
         Some((
             window,
-            PlatformInput::FileDrop(FileDropEvent::Submit {
-                position: self.position,
+            PlatformInput::FileDrop(match self.data.take() {
+                Some(data) => FileDropEvent::DataDrop { position, data },
+                None => FileDropEvent::Submit { position },
             }),
+        ))
+    }
+
+    /// HERDR-WINDOWS: the pointer moved over the window the drag is in.
+    fn handle_motion(&mut self, position: Point<Pixels>) -> Option<(Window, PlatformInput)> {
+        let window = self.window.clone()?;
+        self.position = position;
+        Some((
+            window,
+            PlatformInput::FileDrop(match &self.data {
+                Some(data) => FileDropEvent::DataOver { position, data: data.clone() },
+                None => FileDropEvent::Pending { position },
+            }),
+        ))
+    }
+
+    /// HERDR-WINDOWS: a data drag's bytes were read after Enter.
+    fn complete_data_read(
+        &mut self,
+        generation: u64,
+        data_offer: DataOffer,
+        window: Window,
+        position: Point<Pixels>,
+        data: gpui::ExternalDragData,
+    ) -> Option<(Window, PlatformInput)> {
+        if !self.is_uri_read_current(generation) {
+            data_offer.destroy();
+            return None;
+        }
+        self.data_offer = Some(data_offer);
+        self.window = Some(window.clone());
+        self.position = position;
+        self.data = Some(data.clone());
+        Some((
+            window,
+            PlatformInput::FileDrop(FileDropEvent::DataOver { position, data }),
         ))
     }
 
@@ -493,6 +535,7 @@ where
         self.data_offer = Some(data_offer);
         self.window = Some(window.clone());
         self.position = position;
+        self.data = None;
         Some((
             window,
             PlatformInput::FileDrop(FileDropEvent::Entered { position, paths }),
@@ -510,6 +553,9 @@ pub(crate) struct ExternalDrag {
     source: wl_data_source::WlDataSource,
     bytes: Vec<u8>,
     window: WaylandWindowStatePtr,
+    /// HERDR-WINDOWS: a data drag's MIME type (None: a file drag), and whether a target took the drop.
+    data_mime: Option<String>,
+    dropped: bool,
 }
 
 fn file_uri_list(paths: &FileDragPaths) -> String {
@@ -641,23 +687,33 @@ impl WaylandClientStatePtr {
             return false;
         };
 
-        let ExternalDragPayload::Files(paths) = payload;
-        let uri_list = file_uri_list(paths);
-        if uri_list.is_empty() {
-            return false;
-        }
+        // HERDR-WINDOWS: a data drag offers its own type, to be moved.
+        let (mime, bytes, actions, data_mime) = match payload {
+            ExternalDragPayload::Files(paths) => {
+                let uri_list = file_uri_list(paths);
+                if uri_list.is_empty() {
+                    return false;
+                }
+                (FILE_LIST_MIME_TYPE.to_string(), uri_list.into_bytes(), DndAction::Copy | DndAction::Move, None)
+            }
+            ExternalDragPayload::Data(data) => {
+                (data.mime.to_string(), data.bytes.to_vec(), DndAction::Move, Some(data.mime.to_string()))
+            }
+        };
 
         let serial = state.serial_tracker.get(SerialKind::MousePress);
         let source =
             data_device_manager.create_data_source(&state.globals.qh, DataSourceKind::Drag);
-        source.offer(FILE_LIST_MIME_TYPE.to_string());
-        source.set_actions(DndAction::Copy | DndAction::Move);
+        source.offer(mime);
+        source.set_actions(actions);
         data_device.start_drag(Some(&source), surface, None, serial.as_raw());
 
         state.external_drag = Some(ExternalDrag {
             source,
-            bytes: uri_list.into_bytes(),
+            bytes,
             window,
+            data_mime,
+            dropped: false,
         });
         true
     }
@@ -1049,6 +1105,7 @@ impl WaylandConnection {
                 window: None,
                 position: Point::default(),
                 uri_read_generation: 0,
+                data: None,
             },
             external_drag: None,
             click: ClickState {
@@ -2817,6 +2874,63 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                     };
                     let uri_read_generation = state.drag.begin_uri_read();
 
+                    // HERDR-WINDOWS: this client's own data drag, read as its type and moved.
+                    let own = state.external_drag.as_ref().and_then(|d| d.data_mime.clone());
+                    let offered = state
+                        .data_offers
+                        .iter()
+                        .find(|wrapper| wrapper.inner.id() == data_offer.id())
+                        .map(|wrapper| wrapper.mime_types().to_vec())
+                        .unwrap_or_default();
+                    if let herdr_drag::DragRead::Data(mime) = herdr_drag::choose(&offered, own.as_deref()) {
+                        data_offer.set_actions(DndAction::Move, DndAction::Move);
+                        data_offer.accept(serial, Some(mime.clone()));
+                        let pipe = Pipe::new().unwrap();
+                        data_offer.receive(mime.clone(), unsafe {
+                            BorrowedFd::borrow_raw(pipe.write.as_raw_fd())
+                        });
+                        let fd = pipe.read;
+                        drop(pipe.write);
+                        let read_task = state.common.borrow().background_executor.spawn(async {
+                            read_fd_with_timeout(fd, PIPE_READ_TIMEOUT)
+                        });
+                        let this = this.clone();
+                        state
+                            .common
+                            .borrow()
+                            .foreground_executor
+                            .clone()
+                            .spawn(async move {
+                                let bytes = match read_task.await {
+                                    Ok(bytes) => bytes,
+                                    Err(err) => {
+                                        log::error!("error reading drag data: {err:?}");
+                                        data_offer.destroy();
+                                        return;
+                                    }
+                                };
+                                let Some(client) = this.0.upgrade() else {
+                                    data_offer.destroy();
+                                    return;
+                                };
+                                let data = gpui::ExternalDragData { mime: mime.into(), bytes: bytes.into() };
+                                let mut state = client.borrow_mut();
+                                let input = state.drag.complete_data_read(
+                                    uri_read_generation,
+                                    data_offer,
+                                    drag_window,
+                                    Point::new(x.into(), y.into()),
+                                    data,
+                                );
+                                drop(state);
+                                if let Some((drag_window, input)) = input {
+                                    drag_window.handle_input(input);
+                                }
+                            })
+                            .detach();
+                        return;
+                    }
+
                     const ACTIONS: DndAction = DndAction::Copy;
                     data_offer.set_actions(ACTIONS, ACTIONS);
 
@@ -2888,15 +3002,11 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                 }
             }
             wl_data_device::Event::Motion { x, y, .. } => {
-                let Some(drag_window) = state.drag.window.clone() else {
-                    return;
-                };
-                let position = Point::new(x.into(), y.into());
-                state.drag.position = position;
-
-                let input = PlatformInput::FileDrop(FileDropEvent::Pending { position });
+                let input = state.drag.handle_motion(Point::new(x.into(), y.into()));
                 drop(state);
-                drag_window.handle_input(input);
+                if let Some((drag_window, input)) = input {
+                    drag_window.handle_input(input);
+                }
             }
             wl_data_device::Event::Leave => {
                 let input = state.drag.handle_leave();
@@ -2979,16 +3089,26 @@ impl Dispatch<wl_data_source::WlDataSource, DataSourceKind> for WaylandClientSta
                 let bytes = external_drag.bytes.clone();
                 state.clipboard.send_bytes(fd, bytes);
             }
+            (DataSourceKind::Drag, wl_data_source::Event::DndDropPerformed) => {
+                if let Some(external_drag) = state.external_drag.as_mut() {
+                    external_drag.dropped = true;
+                }
+            }
             (
                 DataSourceKind::Drag,
-                wl_data_source::Event::DndFinished | wl_data_source::Event::Cancelled,
+                event @ (wl_data_source::Event::DndFinished | wl_data_source::Event::Cancelled),
             ) => {
                 let Some(external_drag) = state.external_drag.take() else {
                     return;
                 };
                 external_drag.source.destroy();
 
-                let input = PlatformInput::FileDrop(FileDropEvent::Ended);
+                // HERDR-WINDOWS: a data drag's source learns whether a target took it.
+                let finished = matches!(event, wl_data_source::Event::DndFinished);
+                let input = PlatformInput::FileDrop(match external_drag.data_mime {
+                    Some(_) => FileDropEvent::DataEnded { dropped: external_drag.dropped && finished },
+                    None => FileDropEvent::Ended,
+                });
                 drop(state);
                 external_drag.window.handle_input(input);
             }
@@ -3191,7 +3311,57 @@ mod tests {
             window: None,
             position: Point::default(),
             uri_read_generation: 0,
+            data: None,
         }
+    }
+
+    fn herdr_data() -> gpui::ExternalDragData {
+        gpui::ExternalDragData {
+            mime: "application/x-herdr-drag".into(),
+            bytes: br#"{"kind":"space","id":"sp1","from":"main"}"#.to_vec().into(),
+        }
+    }
+
+    #[test]
+    fn a_data_drag_is_over_then_dropped_with_its_bytes_and_finishes_the_offer() {
+        let mut drag = drag_state();
+        let offer = FakeDataOffer::new("A");
+        let generation = drag.begin_uri_read();
+        let over = drag.complete_data_read(generation, offer.clone(), "left", point(px(10.), px(20.)), herdr_data());
+        assert!(matches!(over, Some(("left", PlatformInput::FileDrop(FileDropEvent::DataOver { data, .. }))) if data == herdr_data()));
+        // Every motion carries the data, at the new place.
+        let moved = drag.handle_motion(point(px(30.), px(40.)));
+        assert!(matches!(moved, Some(("left", PlatformInput::FileDrop(FileDropEvent::DataOver { position, .. }))) if position == point(px(30.), px(40.))));
+        let dropped = drag.handle_drop();
+        assert!(matches!(dropped, Some(("left", PlatformInput::FileDrop(FileDropEvent::DataDrop { position, data }))) if position == point(px(30.), px(40.)) && data == herdr_data()));
+        assert!(offer.finished.get() && offer.destroyed.get());
+        assert!(drag.data.is_none() && drag.window.is_none());
+        // Afterwards, motion goes nowhere.
+        assert!(drag.handle_motion(point(px(1.), px(1.))).is_none());
+    }
+
+    #[test]
+    fn a_data_drag_that_leaves_forgets_its_data_and_a_file_drag_stays_a_file_drag() {
+        let mut drag = drag_state();
+        let generation = drag.begin_uri_read();
+        drag.complete_data_read(generation, FakeDataOffer::new("A"), "left", Point::default(), herdr_data());
+        assert!(matches!(drag.handle_leave(), Some(("left", PlatformInput::FileDrop(FileDropEvent::Exited)))));
+        assert!(drag.data.is_none());
+        // A file drag entering next is pending and submits as before.
+        let generation = drag.begin_uri_read();
+        complete_drag_uri_read(&mut drag, generation, FakeDataOffer::new("B"), "main");
+        assert!(matches!(drag.handle_motion(point(px(5.), px(5.))), Some(("main", PlatformInput::FileDrop(FileDropEvent::Pending { .. })))));
+        assert!(matches!(drag.handle_drop(), Some(("main", PlatformInput::FileDrop(FileDropEvent::Submit { .. })))));
+    }
+
+    #[test]
+    fn a_stale_data_read_is_dropped() {
+        let mut drag = drag_state();
+        let offer = FakeDataOffer::new("A");
+        let generation = drag.begin_uri_read();
+        drag.handle_leave();
+        assert!(drag.complete_data_read(generation, offer.clone(), "left", Point::default(), herdr_data()).is_none());
+        assert!(offer.destroyed.get() && drag.data.is_none());
     }
 
     fn complete_drag_uri_read(

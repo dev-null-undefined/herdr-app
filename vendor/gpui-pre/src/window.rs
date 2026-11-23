@@ -9,7 +9,7 @@ use crate::{
     AsyncWindowContext, AtlasTile, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow,
     Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
     DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
-    EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs,
+    EntityId, EventEmitter, ExternalDragPayload, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs,
     Hsla, InputHandler, InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent,
     Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent,
     MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels,
@@ -5697,6 +5697,22 @@ impl Window {
                     self.refresh();
                     PlatformInput::FileDrop(FileDropEvent::Ended)
                 }
+                // HERDR-WINDOWS: data drags stay events of their own (no
+                // `active_drag`, no synthesized mouse events); the app reads them.
+                FileDropEvent::DataOver { position, data } => {
+                    self.mouse_position = position;
+                    PlatformInput::FileDrop(FileDropEvent::DataOver { position, data })
+                }
+                FileDropEvent::DataDrop { position, data } => {
+                    cx.activate(true);
+                    self.mouse_position = position;
+                    PlatformInput::FileDrop(FileDropEvent::DataDrop { position, data })
+                }
+                FileDropEvent::DataEnded { dropped } => {
+                    cx.end_platform_drag(self.handle.window_id());
+                    self.refresh();
+                    PlatformInput::FileDrop(FileDropEvent::DataEnded { dropped })
+                }
             },
             PlatformInput::Touch(touch) => PlatformInput::Touch(touch),
             PlatformInput::LongPress(long_press) => {
@@ -5781,6 +5797,16 @@ impl Window {
         {
             self.refresh();
         }
+    }
+
+    /// HERDR-WINDOWS: hands a drag the app tracks itself (no `active_drag`) to
+    /// the platform now, offering `payload` to other windows and apps. Call it
+    /// while the button that started the drag is held, from a move outside the
+    /// window. Targets get [`FileDropEvent::DataOver`], `Exited` and
+    /// `DataDrop`; this window gets [`FileDropEvent::DataEnded`]. False when
+    /// the platform can't start one (only Wayland takes data payloads).
+    pub fn start_platform_drag(&mut self, payload: ExternalDragPayload) -> bool {
+        self.platform_window.can_start_external_drag() && self.platform_window.start_external_drag(&payload)
     }
 
     /// Whether recognized touch pans may use the platform's predicted touch
@@ -8536,6 +8562,60 @@ mod tests {
         path: PathBuf,
         observed_drag_moves: Rc<RefCell<Vec<Point<Pixels>>>>,
         observed_drops: Rc<RefCell<Vec<PathBuf>>>,
+    }
+
+    /// HERDR-WINDOWS: records the data-drag events its window gets.
+    struct DataDropView(Rc<RefCell<Vec<String>>>);
+
+    impl Render for DataDropView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let seen = self.0.clone();
+            div().size_full().child(canvas(|_, _, _| (), move |_, _, window, _| {
+                window.on_mouse_event(move |event: &FileDropEvent, phase, _, _| {
+                    if phase != DispatchPhase::Capture {
+                        return;
+                    }
+                    let text = match event {
+                        FileDropEvent::DataOver { position, data } => format!("over {} {} {}", data.mime, f32::from(position.x), String::from_utf8_lossy(&data.bytes)),
+                        FileDropEvent::DataDrop { position, data } => format!("drop {} {} {}", data.mime, f32::from(position.x), String::from_utf8_lossy(&data.bytes)),
+                        FileDropEvent::DataEnded { dropped } => format!("ended {dropped}"),
+                        FileDropEvent::Exited => "exited".into(),
+                        _ => "other".into(),
+                    };
+                    seen.borrow_mut().push(text);
+                });
+            }).size_full())
+        }
+    }
+
+    #[gpui::test]
+    fn data_drags_are_events_of_their_own_and_start_on_the_platform(cx: &mut TestAppContext) {
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let window: AnyWindowHandle = cx.add_window({
+            let seen = seen.clone();
+            move |_, _| DataDropView(seen)
+        }).into();
+        let data = crate::ExternalDragData { mime: "application/x-herdr-drag".into(), bytes: b"{}".to_vec().into() };
+        cx.test_window(window).set_start_external_drag_result(true);
+        cx.update_window(window, |_, window, cx| {
+            window.draw(cx).clear(cx);
+            window.dispatch_event(FileDropEvent::DataOver { position: point(px(5.), px(6.)), data: data.clone() }.to_platform_input(), cx);
+            // No gpui drag is made of it: the app reads the events.
+            assert!(cx.active_drag.is_none());
+            window.dispatch_event(FileDropEvent::DataOver { position: point(px(7.), px(8.)), data: data.clone() }.to_platform_input(), cx);
+            assert_eq!(window.mouse_position(), point(px(7.), px(8.)));
+            window.dispatch_event(FileDropEvent::Exited.to_platform_input(), cx);
+            window.dispatch_event(FileDropEvent::DataOver { position: point(px(9.), px(9.)), data: data.clone() }.to_platform_input(), cx);
+            window.dispatch_event(FileDropEvent::DataDrop { position: point(px(9.), px(9.)), data: data.clone() }.to_platform_input(), cx);
+            window.dispatch_event(FileDropEvent::DataEnded { dropped: true }.to_platform_input(), cx);
+            // Started from here, it goes to the platform as is.
+            assert!(window.start_platform_drag(ExternalDragPayload::Data(data.clone())));
+        }).unwrap();
+        assert_eq!(*seen.borrow(), [
+            "over application/x-herdr-drag 5 {}", "over application/x-herdr-drag 7 {}", "exited",
+            "over application/x-herdr-drag 9 {}", "drop application/x-herdr-drag 9 {}", "ended true",
+        ]);
+        assert_eq!(cx.test_window(window).external_drag_data(), [data]);
     }
 
     struct FileDropExitView(Rc<Cell<usize>>);

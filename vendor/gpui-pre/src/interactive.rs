@@ -1,9 +1,9 @@
 use crate::{
     Bounds, Capslock, Context, Empty, IntoElement, Keystroke, LongPressEvent, Modifiers, Pixels,
-    Point, Render, TouchDragEvent, Window, point, seal::Sealed,
+    Point, Render, SharedString, TouchDragEvent, Window, point, seal::Sealed,
 };
 use smallvec::SmallVec;
-use std::{any::Any, fmt::Debug, ops::Deref, path::PathBuf};
+use std::{any::Any, fmt::Debug, ops::Deref, path::PathBuf, sync::Arc};
 
 /// An event from a platform input source.
 pub trait InputEvent: Sealed + 'static {
@@ -706,6 +706,18 @@ impl ExternalPaths {
 pub enum ExternalDragPayload {
     /// Real on-disk paths, handed to the platform as an outbound file drag.
     Files(FileDragPaths),
+    /// HERDR-WINDOWS: bytes of one MIME type (an app's own drag between its
+    /// windows). Only Wayland offers them; other platforms decline.
+    Data(ExternalDragData),
+}
+
+/// HERDR-WINDOWS: what a data drag carries: one MIME type and its bytes.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ExternalDragData {
+    /// The MIME type offered, e.g. `application/x-herdr-drag`.
+    pub mime: SharedString,
+    /// The payload, as the source offered it.
+    pub bytes: Arc<[u8]>,
 }
 
 /// Paths handed to the platform for a native file drag. Directory metadata is
@@ -756,6 +768,26 @@ pub enum FileDropEvent {
     Exited,
     /// The platform-owned drag session has ended.
     Ended,
+    /// HERDR-WINDOWS: a data drag ([`ExternalDragPayload::Data`]) entered the
+    /// window or moved over it. It leaves with [`FileDropEvent::Exited`].
+    DataOver {
+        /// The position of the pointer relative to the window.
+        position: Point<Pixels>,
+        /// What the drag carries.
+        data: ExternalDragData,
+    },
+    /// HERDR-WINDOWS: a data drag was dropped onto the window.
+    DataDrop {
+        /// The position of the pointer relative to the window.
+        position: Point<Pixels>,
+        /// What the drag carries.
+        data: ExternalDragData,
+    },
+    /// HERDR-WINDOWS: the data drag this window started ended, sent to that window.
+    DataEnded {
+        /// Whether a target took the drop (false: cancelled, or dropped where nothing accepts it).
+        dropped: bool,
+    },
 }
 
 impl Sealed for FileDropEvent {}

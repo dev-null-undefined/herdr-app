@@ -55,6 +55,8 @@ pub(crate) struct TestWindowState {
     scale_factor: f32,
     appearance: WindowAppearance,
     external_drag_files: Vec<(PathBuf, bool)>,
+    /// HERDR-WINDOWS: data drags started from this window.
+    external_drag_data: Vec<crate::ExternalDragData>,
     start_external_drag_result: bool,
 }
 
@@ -129,6 +131,7 @@ impl TestWindow {
             scale_factor: 2.0,
             appearance: WindowAppearance::Light,
             external_drag_files: Vec::new(),
+            external_drag_data: Vec::new(),
             start_external_drag_result: false,
         })))
     }
@@ -282,6 +285,11 @@ impl TestWindow {
 
     pub fn external_drag_files(&self) -> Vec<(PathBuf, bool)> {
         self.0.lock().external_drag_files.clone()
+    }
+
+    /// HERDR-WINDOWS: the data drags started from this window.
+    pub fn external_drag_data(&self) -> Vec<crate::ExternalDragData> {
+        self.0.lock().external_drag_data.clone()
     }
 
     pub fn set_start_external_drag_result(&self, result: bool) {
@@ -579,6 +587,7 @@ impl PlatformWindow for TestWindow {
             crate::ExternalDragPayload::Files(paths) => {
                 state.external_drag_files.extend_from_slice(paths.entries());
             }
+            crate::ExternalDragPayload::Data(data) => state.external_drag_data.push(data.clone()),
         }
         state.start_external_drag_result
     }

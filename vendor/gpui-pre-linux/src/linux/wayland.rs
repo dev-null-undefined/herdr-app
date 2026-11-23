@@ -2,6 +2,8 @@ mod client;
 mod clipboard;
 mod cursor;
 mod display;
+// HERDR-WINDOWS: data drags between this client's windows.
+mod herdr_drag;
 mod popup;
 mod serial;
 mod window;

@@ -76,6 +76,11 @@ impl<T: ReceiveData> DataOffer<T> {
         self.mime_types.iter().any(|t| t == mime_type)
     }
 
+    /// HERDR-WINDOWS: every type the offer carries, for a drag's Enter.
+    pub fn mime_types(&self) -> &[String] {
+        &self.mime_types
+    }
+
     fn read_bytes(&self, connection: &Connection, mime_type: &str) -> Option<Vec<u8>> {
         let pipe = Pipe::new().unwrap();
         self.inner.receive_data(mime_type.to_string(), unsafe {
