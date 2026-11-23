@@ -275,6 +275,28 @@ pub fn claim(held: &mut Screens, owners: &Owners, model: &Model, space: &str, ta
     }
 }
 
+/// Moves `id` to position `index` (1 = first) among `own` (the items a
+/// window shows, in order): those items take each other's places, the rest
+/// stay put. When `own` is everything, that's the plain move it always was.
+pub fn place_among<T>(items: &mut Vec<T>, id_of: impl Fn(&T) -> &str, own: &[String], id: &str, index: usize) {
+    let mut order: Vec<String> = own.iter().filter(|o| *o != id).cloned().collect();
+    order.insert(index.saturating_sub(1).min(order.len()), id.to_owned());
+    let slots: Vec<usize> = items.iter().enumerate().filter(|(_, t)| id_of(t) == id || own.iter().any(|o| o == id_of(t))).map(|(i, _)| i).collect();
+    if slots.len() != order.len() {
+        return;
+    }
+    let mut taken: Vec<Option<T>> = std::mem::take(items).into_iter().map(Some).collect();
+    let mut moving: HashMap<String, T> = HashMap::new();
+    for &i in &slots {
+        let t = taken[i].take().expect("each slot once");
+        moving.insert(id_of(&t).to_owned(), t);
+    }
+    for (&i, o) in slots.iter().zip(&order) {
+        taken[i] = moving.remove(o);
+    }
+    *items = taken.into_iter().flatten().collect();
+}
+
 /// `screens()` for mods: every window, open or not, with what it holds.
 pub fn listing(owners: &Owners, focused: &str) -> Value {
     let mut names: BTreeSet<String> = owners.listed.clone();
@@ -956,6 +978,26 @@ mod tests {
         assert!(in_flight("t-r3-keep"));
         release("t-r3-keep");
         assert!(!in_flight("t-r3-keep"));
+    }
+
+    #[test]
+    fn a_move_counts_what_its_window_shows_and_is_the_plain_move_alone() {
+        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+        let go = |items: &[&str], own: &[&str], id: &str, index: usize| {
+            let mut v = names(items);
+            place_among(&mut v, |s| s, &names(own), id, index);
+            v
+        };
+        // Alone (everything's its own): the plain move.
+        let all = ["a", "b", "c", "d"];
+        assert_eq!(go(&all, &all, "d", 1), names(&["d", "a", "b", "c"]));
+        assert_eq!(go(&all, &all, "a", 3), names(&["b", "c", "a", "d"]));
+        assert_eq!(go(&all, &all, "a", 99), names(&["b", "c", "d", "a"]));
+        // A window showing b and d: d first among them, a and c stay where they are.
+        assert_eq!(go(&all, &["b", "d"], "d", 1), names(&["a", "d", "c", "b"]));
+        assert_eq!(go(&all, &["b", "d"], "b", 2), names(&["a", "d", "c", "b"]));
+        // An item it doesn't show yet moves in among them.
+        assert_eq!(go(&all, &["b", "d"], "a", 2), names(&["b", "a", "c", "d"]));
     }
 
     #[test]

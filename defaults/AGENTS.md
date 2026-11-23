@@ -614,7 +614,8 @@ The main ones:
   terminals start in that machine's home unless folder, and its tabs and
   splits stay there; `spaces()` gives each space's `machine`, null here),
   `space.close {id?, confirmed?}`, `space.rename {id?, name}` ("": Herdr's name again),
-  `space.move {id, index}`, `space.select {index | id}`, `space.next`, `space.prev`.
+  `space.move {id, index}`, `space.select {index | id}`, `space.next`, `space.prev`
+  (index, next and prev count the spaces this Herdr window shows).
   With no `argv`, the target core chooses that machine's default shell (PowerShell 7 when available on Windows).
 - Tabs: `tab.new {name?, space?, folder?, argv?, task?}` (argv: an
   agent to run, task: its first message). Agents run in your interactive
@@ -624,7 +625,8 @@ The main ones:
   props?}` for a tab whose only pane is a mod (a file, a board; split a shell
   in beside it like any tab), `tab.close {id?, confirmed?}` (closing the last tab
   closes its space and asks first unless confirmed),
-  `tab.rename {id?, name}` ("": its number again), `tab.move {id, index}`,
+  `tab.rename {id?, name}` ("": its number again), `tab.move {id, index}` (index among
+  the space's tabs this window shows),
   `tab.select {index | id}`, `tab.next`, `tab.prev`,
   `tab.settle {id?}`, `tab.unsettle {id?}` (index, next and prev
   skip settled tabs).

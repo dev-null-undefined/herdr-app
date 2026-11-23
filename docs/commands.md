@@ -50,7 +50,7 @@ Rename a space (asks the person when no name; an empty name: called after where 
 
 ## `space.move`
 
-Move a space to a position (1 = first).
+Move a space to a position (1 = first) among the spaces this Herdr window shows (with one window: all), within its machine's block.
 
 | Argument | Required |
 |---|---|
@@ -91,7 +91,7 @@ Rename a tab (asks the person when no name; an empty name: called by its number 
 
 ## `tab.move`
 
-Move a tab to a position in its space (1 = first).
+Move a tab to a position in its space (1 = first) among the tabs this Herdr window shows of it.
 
 | Argument | Required |
 |---|---|

@@ -3089,7 +3089,12 @@ impl AppWindow {
             }
             "space.move" => {
                 let (Some(id), Some(i)) = (Self::arg(a, "id"), a.get("index").and_then(Value::as_u64)) else { return self.fail("space.move needs id and index") };
-                if !self.model.move_space(id, i as usize) { return self.fail(format!("no space {id:?}")); }
+                if self.model.space(id).is_none() { return self.fail(format!("no space {id:?}")); }
+                // By position among the spaces this window shows, as space.select;
+                // inside its machine's block, as always.
+                let own = self.own_spaces();
+                crate::screens::place_among(&mut self.model.spaces, |p| &p.id, &own, id, i as usize);
+                self.model.order_spaces();
             }
             "space.select" => {
                 // By position among the spaces this window shows.
@@ -3143,12 +3148,11 @@ impl AppWindow {
             }
             "tab.move" => {
                 let (Some(id), Some(i)) = (Self::arg(a, "id"), a.get("index").and_then(Value::as_u64)) else { return self.fail("tab.move needs id and index") };
-                let Some(pid) = self.model.space_of(id).map(|p| p.id.clone()) else { return self.fail(format!("no tab {id:?}")) };
+                let Some(pid) = self.model.space_of(id).filter(|p| p.tab(id).is_some()).map(|p| p.id.clone()) else { return self.fail(format!("no tab {id:?}")) };
+                // By position among the space's tabs this window shows, as tab.select.
+                let own: Vec<String> = self.own_tabs(self.model.space(&pid).unwrap()).into_iter().map(|t| t.id.clone()).collect();
                 let p = self.model.space_mut(&pid).unwrap();
-                let from = p.tabs.iter().position(|c| c.id == id).unwrap();
-                let c = p.tabs.remove(from);
-                let to = (i as usize).saturating_sub(1).min(p.tabs.len());
-                p.tabs.insert(to, c);
+                crate::screens::place_among(&mut p.tabs, |t| &t.id, &own, id, i as usize);
             }
             "tab.settle" | "tab.unsettle" => {
                 let Some(id) = Self::owned(a, "id").or(active_ctx) else { return self.fail("no tab") };
