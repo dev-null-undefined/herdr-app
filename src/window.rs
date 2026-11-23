@@ -516,6 +516,8 @@ pub struct AppWindow {
     known_ids: HashSet<String>,
     /// The core listed the machines at least once (their documents can load).
     machines_seen: bool,
+    /// Running a command another window forwarded (it isn't forwarded again).
+    forwarded: bool,
     /// The copy whose drag this window handed to the platform (drag.rs), and
     /// the copy a platform drag is over here now.
     drag_out: Option<u64>,
@@ -616,6 +618,7 @@ impl AppWindow {
             place_write: None,
             known_ids: HashSet::new(),
             machines_seen: false,
+            forwarded: false,
             drag_out: None,
             drag_over: None,
         };
@@ -3035,8 +3038,14 @@ impl AppWindow {
 
     fn dispatch(&mut self, name: &str, a: &Value, person: bool, window: &mut Window, cx: &mut Context<Self>) {
         // Showing what another Herdr window shows: that window does it, in front.
-        if let Some(other) = self.shown_elsewhere(name, a) {
-            crate::screens::request_to(&other, Request::Run { name: name.to_owned(), args: a.clone() });
+        // Once only: a forwarded command runs where it landed, even while the
+        // two windows' documents still disagree.
+        if !self.forwarded
+            && let Some(other) = self.shown_elsewhere(name, a)
+        {
+            if !crate::screens::request_to(&other, Request::Forwarded { name: name.to_owned(), args: a.clone() }) {
+                return self.fail(format!("window {other} shows that, and isn't taking commands"));
+            }
             self.raise(&other, window, cx);
             self.reply = Some(json!({ "ok": true, "window": other }));
             return;
@@ -3946,6 +3955,14 @@ impl AppWindow {
                 self.focused_pane = None;
                 self.agent_focused = None;
                 self.sync(window, cx);
+            }
+            Request::Forwarded { name, args } => {
+                self.forwarded = true;
+                let reply = self.run_as(&name, args, false, window, cx);
+                self.forwarded = false;
+                if let Some(error) = reply.get("error") {
+                    tracing::warn!("{name} from another window: {error}");
+                }
             }
             Request::Look { look, pick } => {
                 let pick: Option<crate::layout::ThemeChoice> = serde_json::from_value(pick).ok().flatten();
@@ -6242,8 +6259,8 @@ export default class SystemToast extends View {
         let layout = json!({ "id": "root", "type": "row", "children": [{ "id": "work", "type": "block", "content": { "tab": "active" } }] });
         let (main, cx) = open_window(cx, "noop", "", layout);
         crate::screens::note_open("main");
-        crate::screens::note_open("left");
-        let (_tx, rx) = async_channel::unbounded();
+        let (tx, rx) = async_channel::unbounded();
+        crate::screens::note_open_with("left", tx);
         let left = cx.cx.open_window(gpui::size(gpui::px(800.0), gpui::px(600.0)), |window, cx| super::AppWindow::new(crate::hc::offline(), "left".into(), rx, window, cx));
         crate::mods::set_shared("screens".into(), json!({ "left": { "spaces": ["beta"], "adhoc": true } }));
         // Two screens of one home: the same spaces, an agent in each.
@@ -6298,8 +6315,15 @@ export default class SystemToast extends View {
         assert_eq!(main.update(cx, |this, _| (attached(this), this.model.active.clone())), (vec![], None));
         assert_eq!(left.update(&mut cx.cx, |this, _, _| attached(this)).unwrap(), vec!["t1", "t2"]);
         // Showing what left shows, from main, runs in left.
+        assert_eq!(left.update(&mut cx.cx, |this, _, _| this.model.active.clone()).unwrap().as_deref(), Some("beta"));
         let reply = main.update_in(cx, |this, window, cx| this.run_as("space.select", json!({ "id": "alpha" }), false, window, cx));
         assert_eq!(reply["window"], "left");
+        cx.run_until_parked();
+        assert_eq!(left.update(&mut cx.cx, |this, _, _| this.model.active.clone()).unwrap().as_deref(), Some("alpha"));
+        // A window that can't take it says so.
+        crate::screens::note_open("left");
+        let reply = main.update_in(cx, |this, window, cx| this.run_as("space.select", json!({ "id": "beta" }), false, window, cx));
+        assert!(reply["error"].as_str().is_some_and(|e| e.contains("isn't taking commands")), "{reply}");
     }
 
     #[test]

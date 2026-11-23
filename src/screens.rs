@@ -678,6 +678,12 @@ pub fn window_of_terminal(address: &str, cx: &App) -> Option<String> {
 #[cfg(test)]
 pub fn note_open(name: &str) {
     let (tx, _) = async_channel::unbounded();
+    note_open_with(name, tx);
+}
+
+/// A test window whose requests go to `tx` (its `AppWindow`'s receiver).
+#[cfg(test)]
+pub fn note_open_with(name: &str, tx: async_channel::Sender<Request>) {
     OPEN.with_borrow_mut(|o| {
         o.retain(|w| w.name != name);
         o.push(Open { name: name.to_owned(), tx, handle: None });

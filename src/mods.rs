@@ -400,6 +400,9 @@ pub enum Request {
     /// Another window switched the layout (every window shows the same one);
     /// `fresh`: it was reset, so this window's clicks are gone too.
     Layout { name: String, fresh: bool },
+    /// A command for what this window shows, run here once (never forwarded
+    /// again), as a script's: errors are logged, nothing asks the person.
+    Forwarded { name: String, args: Value },
     /// Another window changed the look (a theme pick, a text size): the look is
     /// the whole app's. The layout root's `look`, and the theme pick among the clicks.
     Look { look: Value, pick: Value },
