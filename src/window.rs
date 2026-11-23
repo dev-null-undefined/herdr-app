@@ -2275,6 +2275,8 @@ impl AppWindow {
         }
         let mut orphans = self.live.iter()
             .filter(|(a, _)| self.model.pane_of(a).is_none() && !self.changing_terminals.contains(*a) && !self.closing_terminals.contains_key(*a))
+            // Another window's new terminal: its document places it in a moment.
+            .filter(|(a, _)| !crate::screens::in_flight(a))
             .filter_map(|(a, r)| {
                 let machine = a.split_once('/').map(|(m, _)| m);
                 if !self.documents.get(machine.unwrap_or("")).is_some_and(|s| s.available) { return None; }
@@ -2526,6 +2528,7 @@ impl AppWindow {
         })
         .map_err(|e| format!("cannot start a terminal: {e:#}"))?;
         self.born.borrow_mut().insert(addr.clone(), Instant::now());
+        crate::screens::note_born(&addr);
         // Follow the launch folder until the first live folder report arrives.
         if !cwd.is_empty() {
             self.cwds.insert(addr.clone(), cwd.clone());
@@ -2748,6 +2751,7 @@ impl AppWindow {
         };
         let (tx, rx) = std::sync::mpsc::channel();
         self.changing_terminals.insert(address.clone());
+        crate::screens::hold(&address);
         self.pending_terminals.insert(address.clone(), PendingTerminalChange { change, reply: rx });
         let core = self.core.clone();
         let addr = address.clone();
@@ -2773,6 +2777,7 @@ impl AppWindow {
 
     fn apply_terminal_change(&mut self, address: String, change: TerminalChange, result: Result<(), String>, window: &mut Window, cx: &mut Context<Self>) {
         self.changing_terminals.remove(&address);
+        crate::screens::release(&address);
         if let Err(error) = result {
             tracing::error!("terminal change for {address} failed: {error}");
             if !self.draining { self.layout_notice("Could not change terminal pane", &error, window, cx); }

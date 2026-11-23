@@ -19,7 +19,7 @@ use gpui::{App, AppContext as _, WindowHandle};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 pub const MAIN: &str = "main";
@@ -276,6 +276,35 @@ thread_local! {
     /// Names in settings.json `windows` (main always counts as listed).
     static LISTED: RefCell<BTreeSet<String>> = const { RefCell::new(BTreeSet::new()) };
     static CORE: RefCell<Option<Arc<crate::hc::Core>>> = const { RefCell::new(None) };
+    /// Terminals a window started lately, or is giving a pane: main leaves
+    /// them alone until that window's document places them.
+    static BORN: RefCell<HashMap<String, std::time::Instant>> = RefCell::new(HashMap::new());
+    static HELD: RefCell<BTreeSet<String>> = const { RefCell::new(BTreeSet::new()) };
+}
+
+/// How long a window's new terminal is its own to place.
+const BORN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A window started a terminal.
+pub fn note_born(address: &str) {
+    BORN.with_borrow_mut(|b| {
+        b.retain(|_, at| at.elapsed() < BORN_GRACE);
+        b.insert(address.to_owned(), std::time::Instant::now());
+    });
+}
+
+/// A window is giving a terminal a pane (`terminal.keep`), until `release`.
+pub fn hold(address: &str) {
+    HELD.with_borrow_mut(|h| h.insert(address.to_owned()));
+}
+
+pub fn release(address: &str) {
+    HELD.with_borrow_mut(|h| h.remove(address));
+}
+
+/// Whether some window is placing this terminal itself (main doesn't adopt it).
+pub fn in_flight(address: &str) -> bool {
+    HELD.with_borrow(|h| h.contains(address)) || BORN.with_borrow(|b| b.get(address).is_some_and(|at| at.elapsed() < BORN_GRACE))
 }
 
 pub fn open_names() -> Vec<String> {
@@ -811,6 +840,17 @@ mod tests {
         assert!(hand_to_main(&mut h, "zed"));
         assert_eq!(serde_json::to_value(&h).unwrap(), json!({ "main": { "spaces": ["alpha", "beta"], "tabs": ["box/g1"] } }));
         assert!(!hand_to_main(&mut h, "zed"));
+    }
+
+    #[test]
+    fn a_terminal_a_window_is_placing_is_not_up_for_adoption() {
+        assert!(!in_flight("t-r3"));
+        note_born("t-r3");
+        assert!(in_flight("t-r3"));
+        hold("t-r3-keep");
+        assert!(in_flight("t-r3-keep"));
+        release("t-r3-keep");
+        assert!(!in_flight("t-r3-keep"));
     }
 
     #[test]
