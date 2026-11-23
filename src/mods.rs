@@ -1271,14 +1271,17 @@ pub fn install_policy() -> async_channel::Receiver<Request> {
 /// needs a fresh default rather than an edit of the old one.
 /// Readies the next load of `inst` in Herdr window `window`; returns the
 /// copy's number (for commands). The localStorage file goes by the mod and
-/// its props: a copy in another window than main gets `window: <name>` in its
-/// props (`props_in`), so it keeps a file of its own; main's keep today's.
-pub fn prepare_load(inst: &Instance, window: &str) -> u64 {
+/// its props: with `by_window`, a layout or overlay copy in another window
+/// than main gets `window: <name>` in its props (`props_in`), so it keeps a
+/// file of its own; main's keep today's. A tab's mods (not `by_window`) keep
+/// their props and store whichever window shows the tab.
+pub fn prepare_load(inst: &Instance, window: &str, by_window: bool) -> u64 {
     let copy = COPY_SEQ.with(|s| {
         s.set(s.get() + 1);
         s.get()
     });
-    let inst = &Instance { name: inst.name.clone(), props: props_in(&inst.props, window) };
+    let props = if by_window { props_in(&inst.props, window) } else { inst.props.clone() };
+    let inst = &Instance { name: inst.name.clone(), props };
     let dir = app_dir().join("data").join(&inst.name);
     let _ = std::fs::create_dir_all(&dir);
     let file = store_file(&inst.props);

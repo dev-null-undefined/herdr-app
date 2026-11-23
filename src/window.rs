@@ -1371,7 +1371,10 @@ impl AppWindow {
                 HeaderContent::Mod { name, props } => Some((name.clone(), props.clone())),
                 HeaderContent::Builtin(_) => None,
             });
-        for c in self.model.tabs() {
+        // Only the tabs this window shows: another window runs the rest.
+        let owners = crate::screens::Owners::now();
+        let tabs = self.model.spaces.iter().flat_map(|p| p.tabs.iter().filter(|c| owners.tab(&c.id, &p.id) == self.name).collect::<Vec<_>>());
+        for c in tabs {
             for n in c.root.walk() {
                 if let Some(Content::Mod { name, props }) = n.content() {
                     out.insert(n.id.clone(), inst(name, props));
@@ -1574,7 +1577,10 @@ impl AppWindow {
         let want: HashMap<String, Instance> = mods_visible.into_iter().collect();
         for (slot, inst) in want {
             if !self.copies.contains_key(&slot) {
-                let copy = self.load(inst, window, cx);
+                // A tab's mods (panes, their headers) keep their props and store
+                // whichever window shows the tab; the layout's say whose they are.
+                let by_window = self.model.tab_of(&slot).is_none() && !slot.ends_with("#frame");
+                let copy = self.load(inst, by_window, window, cx);
                 if slot.starts_with("float:")
                     && let Some(root) = &copy.root
                 {
@@ -1776,13 +1782,13 @@ impl AppWindow {
         self.pane_term(pane).map(|t| t.view.read(cx).focus_target(cx))
     }
 
-    fn load(&self, inst: Instance, window: &mut Window, cx: &mut Context<Self>) -> Copy {
+    fn load(&self, inst: Instance, by_window: bool, window: &mut Window, cx: &mut Context<Self>) -> Copy {
         let mut copy = Copy { inst, id: 0, root: None, _watch: None, error: None };
         let (Some(runtime), Some(folder)) = (&self.runtime, self.folders.get(&copy.inst.name)) else {
             copy.error = Some(format!("no mod folder ~/.config/herdr-app/mods/{}", copy.inst.name));
             return copy;
         };
-        copy.id = mods::prepare_load(&copy.inst, &self.name);
+        copy.id = mods::prepare_load(&copy.inst, &self.name, by_window);
         match runtime.try_load(&folder.dir, window, cx) {
             Ok(root) => {
                 if self.file_events.is_none() {
@@ -2389,7 +2395,9 @@ impl AppWindow {
         let mut todo: HashMap<(Option<String>, String), Vec<String>> = HashMap::new();
         let mut moved = false;
         let owners = crate::screens::Owners::now();
-        let mine: HashSet<String> = self.live.keys().filter(|a| self.shows_terminal(&owners, a)).cloned().collect();
+        // Main reads every terminal's (its `where` labels name every space);
+        // another window reads its own.
+        let mine: HashSet<String> = self.live.keys().filter(|a| self.is_main() || self.shows_terminal(&owners, a)).cloned().collect();
         for (addr, rec) in self.live.iter().filter(|(a, _)| mine.contains(*a)) {
             // Core's live folder of what runs there (any machine), else the shell's (local).
             let cwd = rec
@@ -3797,7 +3805,7 @@ impl AppWindow {
             focus.focus(window, cx);
         }
         if layout.is_none() {
-            let copy = self.load(Instance { name, props }, window, cx);
+            let copy = self.load(Instance { name, props }, true, window, cx);
             // Popups (menus) are as tall as what's in them; `height` is the most.
             if fit
                 && let Some(root) = &copy.root
