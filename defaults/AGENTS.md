@@ -190,6 +190,8 @@ the app id stays `herdr-app`.
 - Each window has its own selection, pane zoom, settled tabs, recent spaces,
   seen attention, layout clicks (`layouts/.state/<layout>@<name>.json`; main's
   are `<layout>.json`) and spot on screen, and its own copy of every mod.
+  Outside main a copy's `props()` also have `window: "<name>"`, which gives it
+  its own localStorage.
   Settings, keys, layouts, the UI zoom, themes and shared state are everyone's;
   `layout.switch` switches every window.
 - Only the window showing an agent rings and toasts for it (agents in no tab:

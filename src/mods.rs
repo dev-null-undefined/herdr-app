@@ -1212,22 +1212,17 @@ pub fn install_policy() -> async_channel::Receiver<Request> {
 /// needs a fresh default rather than an edit of the old one.
 /// Readies the next load of `inst` in Herdr window `window`; returns the
 /// copy's number (for commands). The localStorage file goes by the mod and
-/// its props, as before: copies in two windows with the same props share it.
+/// its props: a copy in another window than main gets `window: <name>` in its
+/// props (`props_in`), so it keeps a file of its own; main's keep today's.
 pub fn prepare_load(inst: &Instance, window: &str) -> u64 {
     let copy = COPY_SEQ.with(|s| {
         s.set(s.get() + 1);
         s.get()
     });
+    let inst = &Instance { name: inst.name.clone(), props: props_in(&inst.props, window) };
     let dir = app_dir().join("data").join(&inst.name);
     let _ = std::fs::create_dir_all(&dir);
-    let file = if inst.props.is_null() {
-        "store.json".to_owned()
-    } else {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        inst.props.to_string().hash(&mut h);
-        format!("store-{:016x}.json", h.finish())
-    };
+    let file = store_file(&inst.props);
     let policy = gpui_shell::policy::Policy::new()
         .with_application(inst.key())
         .with_capabilities(capabilities())
@@ -1238,9 +1233,51 @@ pub fn prepare_load(inst: &Instance, window: &str) -> u64 {
     copy
 }
 
+/// A copy's props in Herdr window `window`: main's as the layout gives them,
+/// another's with `window: <name>` (props that aren't an object stay as they are).
+pub fn props_in(props: &Value, window: &str) -> Value {
+    if window == crate::screens::MAIN {
+        return props.clone();
+    }
+    match props {
+        Value::Null => json!({ "window": window }),
+        Value::Object(o) => {
+            let mut o = o.clone();
+            o.insert("window".into(), json!(window));
+            Value::Object(o)
+        }
+        other => other.clone(),
+    }
+}
+
+/// A copy's localStorage file: one per mod and props.
+fn store_file(props: &Value) -> String {
+    if props.is_null() {
+        return "store.json".to_owned();
+    }
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    props.to_string().hash(&mut h);
+    format!("store-{:016x}.json", h.finish())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_copy_in_another_window_says_so_and_keeps_its_own_store() {
+        let tree = json!({ "section": "spaces" });
+        // Main's props and store files are what they were before windows.
+        assert_eq!(props_in(&tree, "main"), tree);
+        assert_eq!(props_in(&Value::Null, "main"), Value::Null);
+        assert_eq!(store_file(&props_in(&Value::Null, "main")), "store.json");
+        assert_eq!(props_in(&tree, "left"), json!({ "section": "spaces", "window": "left" }));
+        assert_eq!(props_in(&Value::Null, "left"), json!({ "window": "left" }));
+        let files = [store_file(&props_in(&tree, "main")), store_file(&props_in(&tree, "left")), store_file(&props_in(&tree, "right"))];
+        assert!(files[0] != files[1] && files[1] != files[2] && files[0] != files[2], "{files:?}");
+        assert_eq!(props_in(&json!(["x"]), "left"), json!(["x"]));
+    }
 
     #[test]
     fn exec_timeout_defaults_caps_and_rejects_invalid_values() {
