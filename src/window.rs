@@ -587,9 +587,10 @@ impl AppWindow {
         }));
         let closing = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
-            // macOS: the red button hides the app instead, so alerts keep ringing;
-            // the Dock icon or a new launch brings it back, Cmd+Q quits.
-            if cfg!(target_os = "macos") {
+            // macOS: main's red button hides the app instead, so alerts keep ringing;
+            // the Dock icon or a new launch brings it back, Cmd+Q quits. Another
+            // window's closes it.
+            if cfg!(target_os = "macos") && main {
                 cx.hide();
                 return false;
             }
@@ -800,7 +801,8 @@ impl AppWindow {
 
     /// What telemetry.rs counts: how much is open, never what's in it.
     fn observe(&self) {
-        if !crate::telemetry::collecting() {
+        // One report for the app: main's model has every space.
+        if !crate::telemetry::collecting() || !self.is_main() {
             return;
         }
         let m = &self.model;
@@ -3533,6 +3535,11 @@ impl AppWindow {
                 self.picked_theme = self.chrome.look.theme.clone();
                 self.save();
                 self.apply_look(window, cx);
+                // The theme is the app's: every window picks it, or they'd take turns setting theirs.
+                let pick = serde_json::to_value(&self.picked_theme).unwrap_or(Value::Null);
+                for other in crate::screens::open_names().into_iter().filter(|n| *n != self.name) {
+                    crate::screens::request_to(&other, Request::Theme { pick: pick.clone() });
+                }
             }
             "app.zoom_in" | "app.zoom_out" | "app.zoom_reset" => {
                 let zoom = settings::next_zoom(match name {
@@ -3872,6 +3879,15 @@ impl AppWindow {
             Request::Layout { name } => {
                 if name != self.layout_name {
                     self.switch_layout(Some(&name), window, cx);
+                }
+            }
+            Request::Theme { pick } => {
+                let pick: Option<crate::layout::ThemeChoice> = serde_json::from_value(pick).ok().flatten();
+                if pick.is_some() && pick != self.picked_theme {
+                    self.chrome.look.theme = pick.clone();
+                    self.picked_theme = pick;
+                    self.save();
+                    self.apply_look(window, cx);
                 }
             }
         }

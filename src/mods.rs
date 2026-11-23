@@ -399,6 +399,8 @@ pub enum Request {
     Screens,
     /// Another window switched the layout (every window shows the same one).
     Layout { name: String },
+    /// Another window picked a theme (`app.theme`): the theme is the app's.
+    Theme { pick: Value },
 }
 
 static REQUESTS: OnceLock<async_channel::Sender<Request>> = OnceLock::new();
