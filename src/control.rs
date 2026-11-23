@@ -69,13 +69,33 @@ fn raise_running_at(path: &std::path::Path) -> bool {
     true
 }
 
+/// `--window <name>` anywhere after the verb: which Herdr window to talk to.
+fn take_window(args: &[String]) -> Result<(Vec<String>, Option<String>), String> {
+    let mut rest = Vec::new();
+    let mut window = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--window" && !rest.is_empty() {
+            window = Some(it.next().ok_or("--window needs a name")?.clone());
+        } else {
+            rest.push(a.clone());
+        }
+    }
+    Ok((rest, window))
+}
+
 /// The client side; returns the process exit code.
 pub fn client(args: &[String]) -> i32 {
     if args == ["commands"] {
         println!("{}", serde_json::to_string_pretty(&crate::commands::listing()).unwrap());
         return 0;
     }
-    let cmd = match args {
+    let (args, window) = match take_window(args) {
+        Ok(v) => v,
+        Err(e) => return fail(&e),
+    };
+    let args = args.as_slice();
+    let mut cmd = match args {
         [verb, rest @ ..] if verb == "shot" && rest.len() <= 1 => {
             let path = PathBuf::from(rest.first().map(String::as_str).unwrap_or("herdr-shot.png"));
             let path = match std::path::absolute(path) {
@@ -94,8 +114,15 @@ pub fn client(args: &[String]) -> i32 {
             Ok(a) => json!({ "do": command, "args": a }),
             Err(e) => return fail(&e),
         },
-        _ => return fail("usage: herdr-app ls | herdr-app commands | herdr-app status | herdr-app shot [file.png] | herdr-app do <command> [--arg value ... | json]"),
+        _ => return fail("usage: herdr-app ls | herdr-app commands | herdr-app status | herdr-app shot [file.png] | herdr-app do <command> [--arg value ... | json]; --window <name> picks a Herdr window"),
     };
+    // Which window: the one named, else (for do) the one showing the caller's terminal.
+    if let Some(w) = window {
+        cmd["window"] = json!(w);
+    }
+    if let Some(t) = std::env::var("HC_TERMINAL_ID").ok().filter(|t| !t.is_empty()) {
+        cmd["terminal"] = json!(t);
+    }
     let mut stream = match UnixStream::connect(socket()) {
         Ok(s) => s,
         Err(_) if args.first().is_some_and(|v| v == "feedback") => {

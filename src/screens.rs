@@ -1,0 +1,554 @@
+//! Several Herdr windows in one process (`window.new`). Each is a whole
+//! screen of this home: its own model, view, layout clicks and mods, kept in
+//! step with the others through the core's layout documents, as two
+//! computers' screens are. In code a Herdr window is a "screen", so it isn't
+//! mistaken for a mod's `kind: "window"` overlay (`windows.json`).
+//!
+//! Which window shows which space or tab is shared.json `screens`:
+//! `{ "<name>": { "spaces": [ids], "tabs": [ids], "adhoc": true, "closed": true } }`,
+//! ids as Herdr shows them (this computer's bare, others' `<machine>/<id>`).
+//! A space in no list, or held by a window that isn't open, shows in main. A
+//! tab in no list shows where its space does. Windows listed in settings.json
+//! `windows` open at every start; others are made on the fly (`adhoc`) and
+//! kept, closed or not, until `window.forget`.
+
+use crate::mods::{self, Request};
+use crate::model::Model;
+use crate::window::AppWindow;
+use gpui::{App, AppContext as _, WindowHandle};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
+pub const MAIN: &str = "main";
+/// The shared.json key.
+pub const KEY: &str = "screens";
+
+/// What a window holds, as shared.json keeps it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Held {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub spaces: Vec<String>,
+    /// Tabs pulled out of a space shown elsewhere.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tabs: Vec<String>,
+    /// Made on the fly, not listed in settings.json.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub adhoc: bool,
+    /// Closed by itself (not by quitting): an adhoc one stays closed at the next start.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub closed: bool,
+}
+
+pub type Screens = BTreeMap<String, Held>;
+
+pub fn read() -> Screens {
+    mods::shared(KEY).and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default()
+}
+
+/// Writes the owners; every window takes its share again (`Request::Screens`).
+pub fn write(s: &Screens) {
+    let kept: Screens = s.iter().filter(|(_, h)| **h != Held::default()).map(|(n, h)| (n.clone(), h.clone())).collect();
+    mods::set_shared(KEY.into(), serde_json::to_value(&kept).unwrap_or(Value::Null));
+}
+
+pub fn valid(name: &str) -> Result<(), String> {
+    let ok = !name.is_empty() && name.len() <= 32 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if ok { Ok(()) } else { Err(format!("window name {name:?}: 1 to 32 letters, digits, - or _")) }
+}
+
+// ---- who shows what --------------------------------------------------------
+
+/// The owners as they stand: which window shows each space and tab now.
+#[derive(Clone, Debug, Default)]
+pub struct Owners {
+    held: Screens,
+    open: BTreeSet<String>,
+    listed: BTreeSet<String>,
+}
+
+impl Owners {
+    pub fn now() -> Owners {
+        Owners::new(read(), open_names().into_iter().collect(), listed())
+    }
+
+    pub fn new(held: Screens, open: BTreeSet<String>, listed: BTreeSet<String>) -> Owners {
+        Owners { held, open, listed }
+    }
+
+    /// A window whose lists count: main, a listed one, or a kept adhoc one.
+    fn counts(&self, name: &str) -> bool {
+        name == MAIN || self.listed.contains(name) || self.held.get(name).is_some_and(|h| h.adhoc)
+    }
+
+    fn holder(&self, find: impl Fn(&Held) -> bool) -> Option<&str> {
+        self.held.iter().find(|(n, h)| self.counts(n) && find(h)).map(|(n, _)| n.as_str())
+    }
+
+    /// The window a space shows in: the one holding it while that one is open, else main.
+    pub fn space(&self, id: &str) -> &str {
+        self.holder(|h| h.spaces.iter().any(|s| s == id)).filter(|n| self.open.contains(*n)).unwrap_or(MAIN)
+    }
+
+    /// The window a tab shows in: the one it was pulled out to while open, else its space's.
+    pub fn tab(&self, tab: &str, space: &str) -> &str {
+        match self.holder(|h| h.tabs.iter().any(|t| t == tab)) {
+            Some(n) if self.open.contains(n) => n,
+            _ => self.space(space),
+        }
+    }
+
+    /// The window a pane's or terminal's tab shows in (`None`: in no tab).
+    pub fn of_tab_in(&self, model: &Model, node: &str) -> Option<&str> {
+        let space = model.space_of(node)?;
+        let tab = model.tab_of(node)?;
+        Some(self.tab(&tab.id, &space.id))
+    }
+
+    /// Whether `me` shows anything of the space: one of its tabs, or the space itself while it has none.
+    pub fn shows(&self, model: &Model, space: &str, me: &str) -> bool {
+        let Some(p) = model.space(space) else { return false };
+        if p.tabs.is_empty() {
+            return self.space(space) == me;
+        }
+        p.tabs.iter().any(|t| self.tab(&t.id, space) == me)
+    }
+
+    pub fn spaces_of<'a>(&self, model: &'a Model, me: &str) -> Vec<&'a str> {
+        model.spaces.iter().filter(|p| self.shows(model, &p.id, me)).map(|p| p.id.as_str()).collect()
+    }
+
+    pub fn is_open(&self, name: &str) -> bool {
+        self.open.contains(name)
+    }
+
+    pub fn is_listed(&self, name: &str) -> bool {
+        self.listed.contains(name)
+    }
+}
+
+/// Keeps a window's selection on what it shows: its active space one it
+/// shows, each such space's active tab one of its own. Returns whether it changed.
+pub fn keep_view(model: &mut Model, owners: &Owners, me: &str) -> bool {
+    let mut changed = false;
+    let shown: Vec<String> = owners.spaces_of(model, me).into_iter().map(str::to_owned).collect();
+    for p in model.spaces.iter_mut().filter(|p| shown.contains(&p.id)) {
+        let mine: Vec<&str> = p.tabs.iter().filter(|t| owners.tab(&t.id, &p.id) == me).map(|t| t.id.as_str()).collect();
+        let active = p.active.as_deref().or(p.tabs.first().map(|t| t.id.as_str()));
+        if let Some(first) = mine.first()
+            && !active.is_some_and(|a| mine.contains(&a))
+        {
+            // A settled tab only when nothing else is here.
+            let pick = p.tabs.iter().find(|t| mine.contains(&t.id.as_str()) && t.settled.is_none()).map(|t| t.id.clone()).unwrap_or_else(|| first.to_string());
+            p.active = Some(pick);
+            changed = true;
+        }
+    }
+    let active_ok = model.active.as_ref().is_some_and(|a| shown.contains(a));
+    if !active_ok {
+        let next = shown.first().cloned();
+        changed |= model.active != next;
+        model.active = next;
+    }
+    changed
+}
+
+/// Moves a space, a tab or a machine's spaces to window `to` (`window.move`).
+/// A space takes its tabs along, except tabs pulled out to another window. A
+/// tab moves alone and stays in its space. A machine moves the spaces of it
+/// that window `from` shows, once: new ones go where they're started.
+pub fn move_to(held: &mut Screens, owners: &Owners, model: &Model, kind: &str, id: &str, to: &str, from: &str) -> Result<(), String> {
+    let spaces: Vec<String> = match kind {
+        "space" => {
+            model.space(id).ok_or_else(|| format!("no space {id:?}"))?;
+            vec![id.to_owned()]
+        }
+        "tab" => {
+            let space = model.space_of(id).filter(|p| p.tab(id).is_some()).ok_or_else(|| format!("no tab {id:?}"))?.id.clone();
+            for h in held.values_mut() {
+                h.tabs.retain(|t| t != id);
+            }
+            // Back with its space: no entry needed.
+            if owners.space(&space) != to {
+                held.entry(to.to_owned()).or_default().tabs.push(id.to_owned());
+            }
+            return Ok(());
+        }
+        "machine" => {
+            let machine = (!id.is_empty()).then_some(id);
+            let of: Vec<String> = model.spaces.iter().filter(|p| p.machine.as_deref() == machine && owners.shows(model, &p.id, from)).map(|p| p.id.clone()).collect();
+            if !model.spaces.iter().any(|p| p.machine.as_deref() == machine) {
+                return Err(format!("no spaces on machine {id:?} (\"\": this computer)"));
+            }
+            of
+        }
+        other => return Err(format!("window.move kind is \"space\", \"tab\" or \"machine\", not {other:?}")),
+    };
+    for space in spaces {
+        let tabs: Vec<String> = model.space(&space).map(|p| p.tabs.iter().map(|t| t.id.clone()).collect()).unwrap_or_default();
+        for h in held.values_mut() {
+            h.spaces.retain(|s| *s != space);
+        }
+        // Its tabs pulled out to `to` are home again; those in a third window stay.
+        if let Some(h) = held.get_mut(to) {
+            h.tabs.retain(|t| !tabs.contains(t));
+        }
+        if to != MAIN {
+            held.entry(to.to_owned()).or_default().spaces.push(space);
+        }
+    }
+    Ok(())
+}
+
+/// A space or tab just made in window `me` shows there (`space.new`, `tab.new`,
+/// adoption). Returns whether the owners changed.
+pub fn claim(held: &mut Screens, owners: &Owners, model: &Model, space: &str, tab: Option<&str>, me: &str) -> bool {
+    match tab {
+        // A new tab in a space shown elsewhere is pulled out to here.
+        Some(tab) if model.space(space).is_some_and(|p| p.tabs.len() > 1) => {
+            if owners.tab(tab, space) == me {
+                return false;
+            }
+            for h in held.values_mut() {
+                h.tabs.retain(|t| t != tab);
+            }
+            if owners.space(space) != me {
+                held.entry(me.to_owned()).or_default().tabs.push(tab.to_owned());
+            }
+            true
+        }
+        // A new space (or its first tab).
+        _ => {
+            if owners.space(space) == me {
+                return false;
+            }
+            for h in held.values_mut() {
+                h.spaces.retain(|s| s != space);
+            }
+            if me != MAIN {
+                held.entry(me.to_owned()).or_default().spaces.push(space.to_owned());
+            }
+            true
+        }
+    }
+}
+
+/// `screens()` for mods: every window, open or not, with what it holds.
+pub fn listing(owners: &Owners, focused: &str) -> Value {
+    let mut names: BTreeSet<String> = owners.listed.clone();
+    names.insert(MAIN.into());
+    names.extend(owners.held.iter().filter(|(_, h)| h.adhoc).map(|(n, _)| n.clone()));
+    names.extend(owners.open.iter().cloned());
+    let mut out: Vec<Value> = names
+        .into_iter()
+        .map(|name| {
+            let h = owners.held.get(&name).cloned().unwrap_or_default();
+            let kind = if name == MAIN || owners.listed.contains(&name) { "listed" } else { "adhoc" };
+            json!({
+                "name": name, "main": name == MAIN, "kind": kind,
+                "open": owners.open.contains(&name), "focused": name == focused,
+                "spaces": h.spaces, "tabs": h.tabs,
+            })
+        })
+        .collect();
+    // Main first, then by name.
+    out.sort_by_key(|w| (w["main"] != true, w["name"].as_str().unwrap_or_default().to_owned()));
+    Value::Array(out)
+}
+
+// ---- the open windows ------------------------------------------------------
+
+struct Open {
+    name: String,
+    tx: async_channel::Sender<Request>,
+    handle: Option<WindowHandle<AppWindow>>,
+}
+
+thread_local! {
+    static OPEN: RefCell<Vec<Open>> = const { RefCell::new(Vec::new()) };
+    /// Open windows by when they last had focus, the most recent last.
+    static FOCUS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// Names in settings.json `windows` (main always counts as listed).
+    static LISTED: RefCell<BTreeSet<String>> = const { RefCell::new(BTreeSet::new()) };
+    static CORE: RefCell<Option<Arc<crate::hc::Core>>> = const { RefCell::new(None) };
+}
+
+pub fn open_names() -> Vec<String> {
+    OPEN.with_borrow(|o| o.iter().map(|w| w.name.clone()).collect())
+}
+
+pub fn is_open(name: &str) -> bool {
+    OPEN.with_borrow(|o| o.iter().any(|w| w.name == name))
+}
+
+pub fn listed() -> BTreeSet<String> {
+    LISTED.with_borrow(Clone::clone)
+}
+
+/// settings.json `windows` changed: windows that left it are no longer listed
+/// (their spaces show in main); new ones open. Returns the names that are new.
+pub fn set_listed(names: BTreeSet<String>) -> Vec<String> {
+    let names: BTreeSet<String> = names.into_iter().filter(|n| n != MAIN && valid(n).is_ok()).collect();
+    let was = LISTED.replace(names.clone());
+    if was == names {
+        return Vec::new();
+    }
+    request_all(|| Request::Screens);
+    names.difference(&was).cloned().collect()
+}
+
+/// The focused window, else the one focused last, else main.
+pub fn focused() -> String {
+    FOCUS.with_borrow(|f| f.iter().rev().find(|n| is_open(n)).cloned()).unwrap_or_else(|| MAIN.into())
+}
+
+/// A window got or lost the keyboard; mods' `screens()` say which has it.
+pub fn note_focus(name: &str, active: bool) {
+    let before = focused();
+    if active {
+        FOCUS.with_borrow_mut(|f| {
+            f.retain(|n| n != name);
+            f.push(name.to_owned());
+        });
+    }
+    if focused() != before {
+        request_all(|| Request::Refresh);
+    }
+}
+
+fn sender(name: &str) -> Option<async_channel::Sender<Request>> {
+    OPEN.with_borrow(|o| o.iter().find(|w| w.name == name).map(|w| w.tx.clone()))
+}
+
+fn handle(name: &str) -> Option<WindowHandle<AppWindow>> {
+    OPEN.with_borrow(|o| o.iter().find(|w| w.name == name).and_then(|w| w.handle))
+}
+
+/// Sends to one open window; false when it isn't open.
+pub fn request_to(name: &str, r: Request) -> bool {
+    sender(name).is_some_and(|tx| tx.try_send(r).is_ok())
+}
+
+pub fn request_all(r: impl Fn() -> Request) {
+    for tx in OPEN.with_borrow(|o| o.iter().map(|w| w.tx.clone()).collect::<Vec<_>>()) {
+        let _ = tx.try_send(r());
+    }
+}
+
+/// Brings an open window to the front.
+pub fn raise(name: &str, cx: &mut App) -> bool {
+    let Some(h) = handle(name) else { return false };
+    cx.activate(true);
+    h.update(cx, |_, window, _| window.activate_window()).is_ok()
+}
+
+/// After connecting: main, then every listed window and every kept adhoc one
+/// that wasn't closed. Requests from mods and the control socket are routed
+/// to their window from here on.
+pub fn start(core: Arc<crate::hc::Core>, requests: async_channel::Receiver<Request>, cx: &mut App) {
+    CORE.set(Some(core));
+    cx.spawn(async move |cx| {
+        while let Ok(r) = requests.recv().await {
+            cx.update(|cx| route(r, cx));
+        }
+    })
+    .detach();
+    let person = crate::settings::load_person().unwrap_or_default();
+    LISTED.set(person.windows.keys().filter(|n| *n != MAIN && valid(n).is_ok()).cloned().collect());
+    if let Err(e) = open(MAIN, cx) {
+        panic!("cannot open the Herdr window: {e}");
+    }
+    let held = read();
+    let mut later: Vec<String> = listed().into_iter().collect();
+    let kept: Vec<String> = held.iter().filter(|(n, h)| h.adhoc && !h.closed && !later.contains(n)).map(|(n, _)| n.clone()).collect();
+    later.extend(kept);
+    // Listed windows open at every start, whatever they were.
+    let mut cleared = held.clone();
+    for n in &later {
+        if let Some(h) = cleared.get_mut(n) {
+            h.closed = false;
+        }
+    }
+    if cleared != held {
+        write(&cleared);
+    }
+    for name in later {
+        if let Err(e) = open(&name, cx) {
+            tracing::warn!("window {name}: {e}");
+        }
+    }
+    cx.activate(true);
+}
+
+/// The window's options: its title names it, the Wayland app id stays Herdr's.
+fn options(name: &str, cx: &App) -> gpui::WindowOptions {
+    use gpui::{TitlebarOptions, WindowDecorations, WindowOptions, point, px};
+    let (window_bounds, display_id) = crate::place::initial(name, cx);
+    WindowOptions {
+        window_bounds: Some(window_bounds),
+        display_id,
+        // macOS: always see-through, so a layout can draw its own title bar
+        // live; the app drags the window (window/titlebar.rs).
+        titlebar: Some(TitlebarOptions {
+            title: Some(title(name).into()),
+            // Windows: hidden for good (it can't change live); the app draws it.
+            appears_transparent: cfg!(any(target_os = "macos", windows)),
+            traffic_light_position: cfg!(target_os = "macos").then(|| point(px(12.0), px(7.0))),
+        }),
+        app_owns_titlebar_drag: cfg!(target_os = "macos"),
+        // Linux: open with the title bar the shipped layouts draw. Turning the
+        // system's off on the first render, while KWin maps the window, shrinks
+        // it to 20x20; turning it on later (a "system" layout) is fine.
+        window_decorations: Some(WindowDecorations::Client),
+        // Herdr Dev and other side-by-side builds get their own dock icon.
+        app_id: Some(std::env::var("HERDR_APP_ID").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "herdr-app".into())),
+        ..Default::default()
+    }
+}
+
+/// `Herdr · <name>`: window rules (Hyprland's) place each window by it.
+pub fn title(name: &str) -> String {
+    format!("Herdr · {name}")
+}
+
+/// Opens window `name` (`window.new`), or does nothing if it's open. A name
+/// that isn't listed is made an adhoc window, kept until forgotten.
+pub fn open(name: &str, cx: &mut App) -> Result<(), String> {
+    valid(name)?;
+    if is_open(name) {
+        return Ok(());
+    }
+    let core = CORE.with_borrow(Clone::clone).ok_or("Herdr isn't connected to its core yet")?;
+    let mut held = read();
+    let was = held.clone();
+    let entry = held.entry(name.to_owned()).or_default();
+    entry.closed = false;
+    if name != MAIN && !listed().contains(name) {
+        entry.adhoc = true;
+    }
+    if held != was {
+        write(&held);
+    }
+    let (tx, rx) = async_channel::unbounded();
+    OPEN.with_borrow_mut(|o| o.push(Open { name: name.to_owned(), tx, handle: None }));
+    let owned = name.to_owned();
+    let made = cx.open_window(options(name, cx), move |window, cx| cx.new(|cx| AppWindow::new(core, owned, rx, window, cx)));
+    match made {
+        Ok(h) => {
+            OPEN.with_borrow_mut(|o| {
+                if let Some(w) = o.iter_mut().find(|w| w.name == name) {
+                    w.handle = Some(h);
+                }
+            });
+            // Every window's mods see the new one; spaces it holds leave main.
+            request_all(|| Request::Screens);
+            Ok(())
+        }
+        Err(e) => {
+            OPEN.with_borrow_mut(|o| o.retain(|w| w.name != name));
+            Err(format!("cannot open window {name}: {e:#}"))
+        }
+    }
+}
+
+/// A window closed by itself (`window.close`, its close button). Main's
+/// close quits Herdr; another's spaces show in main until it opens again.
+pub fn closed(name: &str, cx: &mut App) {
+    OPEN.with_borrow_mut(|o| o.retain(|w| w.name != name));
+    FOCUS.with_borrow_mut(|f| f.retain(|n| n != name));
+    if name == MAIN {
+        cx.quit();
+        return;
+    }
+    // A forgotten window has no entry left to mark.
+    let mut held = read();
+    if let Some(h) = held.get_mut(name) {
+        h.closed = true;
+        write(&held);
+    }
+    request_all(|| Request::Screens);
+}
+
+/// Forgets an adhoc window (`window.forget`): its spaces and tabs join main.
+/// The caller closes it if it's open.
+pub fn forget(name: &str) -> Result<(), String> {
+    if name == MAIN {
+        return Err("main can't be forgotten".into());
+    }
+    let mut held = read();
+    if listed().contains(name) {
+        return Err(format!("window {name} is listed in settings.json windows; take it out there"));
+    }
+    if held.remove(name).is_none() && !is_open(name) {
+        return Err(format!("no window {name}"));
+    }
+    write(&held);
+    Ok(())
+}
+
+/// Where a request goes. A mod's goes to its own window; `herdr-app do` to
+/// the window it names (`window`), else the one showing the caller's
+/// terminal (`terminal`, from `HC_TERMINAL_ID`), else the focused one.
+/// `status`, `ls` and `shot` mean main unless they name one.
+fn route(r: Request, cx: &mut App) {
+    match r {
+        Request::To { window, request } => {
+            if !request_to(&window, *request) {
+                tracing::debug!("request for closed window {window}");
+            }
+        }
+        Request::Refresh => request_all(|| Request::Refresh),
+        Request::Screens => request_all(|| Request::Screens),
+        Request::Control { cmd, reply } => {
+            let target = match control_target(&cmd, cx) {
+                Ok(t) => t,
+                Err(e) => {
+                    let _ = reply.send(json!({ "error": e }));
+                    return;
+                }
+            };
+            let Some(tx) = sender(&target) else {
+                let _ = reply.send(json!({ "error": format!("no open window {target:?}") }));
+                return;
+            };
+            if let Err(e) = tx.try_send(Request::Control { cmd, reply })
+                && let Request::Control { reply, .. } = e.into_inner()
+            {
+                let _ = reply.send(json!({ "error": format!("window {target} is closing") }));
+            }
+        }
+        // From the app (macOS menu): the focused window.
+        other => {
+            let _ = request_to(&focused(), other);
+        }
+    }
+}
+
+fn control_target(cmd: &Value, cx: &App) -> Result<String, String> {
+    if let Some(w) = cmd.get("window").and_then(Value::as_str).filter(|w| !w.is_empty()) {
+        return if is_open(w) { Ok(w.to_owned()) } else { Err(format!("no open window {w:?} (`herdr-app do window.new --name {w}` opens it)")) };
+    }
+    // A second launch: the window used last comes to the front.
+    if cmd.get("raise").is_some() {
+        return Ok(focused());
+    }
+    if cmd.get("do").is_none() {
+        return Ok(MAIN.into());
+    }
+    if let Some(t) = cmd.get("terminal").and_then(Value::as_str).filter(|t| !t.is_empty())
+        && let Some(w) = window_of_terminal(t, cx)
+    {
+        return Ok(w);
+    }
+    Ok(focused())
+}
+
+/// The window showing a terminal's tab (a sub-agent's: its top agent's), by main's model.
+pub fn window_of_terminal(address: &str, cx: &App) -> Option<String> {
+    let main = handle(MAIN)?;
+    let this = main.read(cx).ok()?;
+    this.window_of_terminal(address, &Owners::now())
+}

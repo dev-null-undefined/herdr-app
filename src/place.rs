@@ -1,8 +1,10 @@
 //! Where the window was: its size, its place on which display, and whether it
-//! was maximized or full screen. Kept in `window.json` so the next start opens
-//! it the same way.
+//! was maximized or full screen. Kept in `window.json` (main) or
+//! `window-<name>.json` (another Herdr window) so the next start opens it the
+//! same way.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -33,16 +35,24 @@ pub struct Place {
 }
 
 thread_local! {
-    /// The place now, as last seen; written to disk once it settles.
-    static NOW: RefCell<Option<Place>> = RefCell::new(load());
+    /// Each window's place now, as last seen; written to disk once it settles.
+    static NOW: RefCell<HashMap<String, Option<Place>>> = RefCell::new(HashMap::new());
 }
 
-fn path() -> PathBuf {
-    crate::mods::app_dir().join("window.json")
+fn path(name: &str) -> PathBuf {
+    if name == crate::screens::MAIN {
+        crate::mods::app_dir().join("window.json")
+    } else {
+        crate::mods::app_dir().join(format!("window-{name}.json"))
+    }
 }
 
-fn load() -> Option<Place> {
-    std::fs::read_to_string(path()).ok().and_then(|s| serde_json::from_str(&s).ok())
+fn load(name: &str) -> Option<Place> {
+    std::fs::read_to_string(path(name)).ok().and_then(|s| serde_json::from_str(&s).ok())
+}
+
+fn with_now<R>(name: &str, f: impl FnOnce(&mut Option<Place>) -> R) -> R {
+    NOW.with_borrow_mut(|n| f(n.entry(name.to_owned()).or_insert_with(|| load(name))))
 }
 
 fn uuid(d: &dyn gpui::PlatformDisplay) -> Option<String> {
@@ -53,8 +63,8 @@ fn uuid(d: &dyn gpui::PlatformDisplay) -> Option<String> {
 /// the window's corner is on it, else last time's size centered; maximized or
 /// full screen as it was. Linux: always centered (Wayland doesn't let a window
 /// place itself, and X11 window managers shift it by their frame each time).
-pub fn initial(cx: &App) -> (WindowBounds, Option<DisplayId>) {
-    let Some(p) = NOW.with(|n| n.borrow().clone()) else {
+pub fn initial(name: &str, cx: &App) -> (WindowBounds, Option<DisplayId>) {
+    let Some(p) = with_now(name, |n| n.clone()) else {
         return (WindowBounds::Windowed(Bounds::centered(None, size(px(FIRST.0), px(FIRST.1)), cx)), None);
     };
     let [x, y, w, h] = p.bounds;
@@ -74,15 +84,14 @@ pub fn initial(cx: &App) -> (WindowBounds, Option<DisplayId>) {
 }
 
 /// Notes where the window is now; the place to write if it changed.
-fn note(window: &Window, cx: &App) -> Option<Place> {
+fn note(name: &str, window: &Window, cx: &App) -> Option<Place> {
     let (state, b): (State, Bounds<Pixels>) = match window.inner_window_bounds() {
         WindowBounds::Windowed(b) => (State::Windowed, b),
         WindowBounds::Maximized(b) => (State::Maximized, b),
         WindowBounds::Fullscreen(b) => (State::Fullscreen, b),
     };
     let display = window.display(cx).and_then(|d| uuid(d.as_ref()));
-    NOW.with(|n| {
-        let mut n = n.borrow_mut();
+    with_now(name, |n| {
         // Maximized on X11 reports the maximized size: keep the windowed one.
         let bounds = match (state, n.as_ref()) {
             (State::Windowed, _) | (_, None) => [f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height)],
@@ -97,27 +106,28 @@ fn note(window: &Window, cx: &App) -> Option<Place> {
     })
 }
 
-fn write(p: &Place) {
+fn write(name: &str, p: &Place) {
     if let Ok(s) = serde_json::to_string_pretty(p) {
-        let _ = crate::persist::write_atomic(&path(), s + "\n");
+        let _ = crate::persist::write_atomic(&path(name), s + "\n");
     }
 }
 
 /// After the window moved or resized: written once it settles (the task
 /// replaces the last one, which cancels it).
-pub fn changed(window: &Window, cx: &App) -> Option<Task<()>> {
-    let p = note(window, cx)?;
+pub fn changed(name: &str, window: &Window, cx: &App) -> Option<Task<()>> {
+    let p = note(name, window, cx)?;
     let ex = cx.background_executor().clone();
+    let name = name.to_owned();
     Some(cx.background_executor().spawn(async move {
         ex.timer(SETTLE).await;
-        write(&p);
+        write(&name, &p);
     }))
 }
 
 /// Writes it now (the window is closing).
-pub fn save(window: &Window, cx: &App) {
-    note(window, cx);
-    if let Some(p) = NOW.with(|n| n.borrow().clone()) {
-        write(&p);
+pub fn save(name: &str, window: &Window, cx: &App) {
+    note(name, window, cx);
+    if let Some(p) = with_now(name, |n| n.clone()) {
+        write(name, &p);
     }
 }

@@ -256,7 +256,28 @@ export function window(): {
   maximized: boolean;
   fullscreen: boolean;
   active: boolean;
+  /** Which Herdr window this copy is shown in (`window.new`): "main", or another's name. */
+  name: string;
+  /** Whether that's main, the first window (closing it quits Herdr). */
+  main: boolean;
 };
+
+/** Every Herdr window of this app (one process, one home): main, those listed in
+ *  settings.json `windows` (`kind: "listed"`), and those made on the fly with
+ *  `window.new` (`"adhoc"`, kept until `window.forget`), open or closed. `spaces`
+ *  and `tabs` are what each holds (space ids as `spaces()` has them, tab ids); they
+ *  stay while it's closed. A space in no list, or held by a window that isn't
+ *  `open`, shows in main; a tab in no list shows where its space does (a tab in a
+ *  list was pulled out of its space). `focused`: the window used last. Main first. Live. */
+export function screens(): {
+  name: string;
+  main: boolean;
+  kind: "listed" | "adhoc";
+  open: boolean;
+  focused: boolean;
+  spaces: string[];
+  tabs: string[];
+}[];
 
 /** For a floating mod: where it sits now. `vertical` on the left/right edges, horizontal on
  *  top/bottom; while dragged, where it would land. `hovered` is true while the pointer is on it

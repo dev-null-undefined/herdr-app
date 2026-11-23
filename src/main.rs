@@ -25,6 +25,7 @@ mod mod_files;
 mod process_cwd;
 mod programs;
 mod remote_shell;
+mod screens;
 mod settings;
 mod setup;
 mod sound;
@@ -46,12 +47,15 @@ herdr-app: the Herdr desktop app. With no arguments it opens the window.
 
 Usage:
   herdr-app                        open the window
-  herdr-app ls                     spaces, their tabs and terminals, in the open window
+  herdr-app ls                     spaces, their tabs and terminals, and the window showing each
   herdr-app do <command> [args]    run a command: --name api --argv '[\"pi\"]', or one JSON object
   herdr-app feedback <text>        draft feedback for the person to review and send
   herdr-app commands               every command, its arguments, what it does
   herdr-app status                 what the window shows, and any errors
   herdr-app shot [file.png]        save the last window frame (default: herdr-shot.png)
+  --window <name>                  (ls, do, status, shot) that Herdr window, not the default:
+                                   main for status and shot; for do, the window showing
+                                   $HC_TERMINAL_ID's tab, else the focused one
   herdr-app check <mod folder>     load a mod once and report what's wrong
   herdr-app --skill                Agent Skill: driving the window, and where hc fits
   herdr-app --version
@@ -167,13 +171,14 @@ fn main() {
             // Not restarted for it: the update goes in when the app quits.
             cx.on_app_quit(|cx| {
                 let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
-                // Where the window was, for the next start (a quit never asks the window).
+                window::QUITTING.store(true, std::sync::atomic::Ordering::SeqCst);
+                // Where each window was, for the next start (a quit never asks the window).
                 for w in cx.windows() {
                     if let Some(w) = w.downcast::<window::AppWindow>() {
                         let _ = w.update(cx, |this, window, cx| {
                             this.drain_documents(window, cx);
                             this.close_mods_now(deadline, window, cx);
-                            place::save(window, cx);
+                            place::save(this.screen_name(), window, cx);
                         });
                     }
                 }
@@ -203,30 +208,7 @@ fn main() {
         });
 }
 
-/// The main window, on a connected core.
+/// The main window, on a connected core, and the other Herdr windows (screens.rs).
 pub fn open_main(core: std::sync::Arc<hc::Core>, requests: async_channel::Receiver<mods::Request>, cx: &mut App) {
-            let (window_bounds, display_id) = place::initial(cx);
-            let options = WindowOptions {
-                window_bounds: Some(window_bounds),
-                display_id,
-                // macOS: always see-through, so a layout can draw its own title bar
-                // live; the app drags the window (window/titlebar.rs).
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Herdr".into()),
-                    // Windows: hidden for good (it can't change live); the app draws it.
-                    appears_transparent: cfg!(any(target_os = "macos", windows)),
-                    traffic_light_position: cfg!(target_os = "macos").then(|| point(px(12.0), px(7.0))),
-                }),
-                app_owns_titlebar_drag: cfg!(target_os = "macos"),
-                // Linux: open with the title bar the shipped layouts draw. Turning the
-                // system's off on the first render, while KWin maps the window, shrinks
-                // it to 20x20; turning it on later (a "system" layout) is fine.
-                window_decorations: Some(WindowDecorations::Client),
-                // Herdr Dev and other side-by-side builds get their own dock icon.
-                app_id: Some(std::env::var("HERDR_APP_ID").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "herdr-app".into())),
-                ..Default::default()
-            };
-            cx.open_window(options, |window, cx| cx.new(|cx| window::AppWindow::new(core, requests, window, cx)))
-                .expect("cannot open the Herdr window");
-            cx.activate(true);
+    screens::start(core, requests, cx);
 }

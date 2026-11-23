@@ -10,6 +10,8 @@ mod movable;
 mod pane_drag;
 mod pane_size;
 mod titlebar;
+mod screen;
+use screen::view_file;
 
 use crate::layout::{Axis, Background as Paint, Content, Fit, HeaderContent, Kind, Line, Node, PaneFrame, Size as Span};
 use crate::model::{self, Tab, Model};
@@ -175,13 +177,33 @@ pub(crate) fn layout_names() -> Vec<String> {
     names
 }
 
-fn state_path(name: &str) -> PathBuf {
-    file(&format!("layouts/.state/{name}.json"))
+/// A layout's clicks in Herdr window `screen`: main's are `<layout>.json` (as
+/// before there were windows), another's `<layout>@<screen>.json`.
+fn state_path(name: &str, screen: &str) -> PathBuf {
+    if screen == crate::screens::MAIN {
+        file(&format!("layouts/.state/{name}.json"))
+    } else {
+        file(&format!("layouts/.state/{name}@{screen}.json"))
+    }
 }
 
-/// The clicks on a layout (layout_sync.rs), none if unreadable.
-fn read_state(name: &str) -> layout_sync::State {
-    std::fs::read_to_string(state_path(name)).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+/// The clicks on a layout in a window (layout_sync.rs), none if unreadable. A
+/// window's first look at a layout starts from main's clicks.
+fn read_state(name: &str, screen: &str) -> layout_sync::State {
+    let own = state_path(name, screen);
+    let path = if own.exists() { own } else { state_path(name, crate::screens::MAIN) };
+    std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+
+/// Every window's clicks on a layout go (a reset).
+fn remove_states(name: &str) {
+    let _ = std::fs::remove_file(state_path(name, crate::screens::MAIN));
+    let prefix = format!("{name}@");
+    for e in std::fs::read_dir(file("layouts/.state")).into_iter().flatten().flatten() {
+        if e.file_name().to_str().is_some_and(|f| f.starts_with(&prefix) && f.ends_with(".json")) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 fn state_text(s: &layout_sync::State) -> String {
@@ -253,7 +275,7 @@ fn clone_layout(name: &str, to: &str) -> std::io::Result<()> {
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(layout_path(to));
-        let _ = std::fs::remove_file(state_path(to));
+        let _ = std::fs::remove_file(state_path(to, crate::screens::MAIN));
     }
     result
 }
@@ -346,6 +368,8 @@ struct Watched {
 
 pub struct AppWindow {
     core: Arc<Core>,
+    /// Which Herdr window this is (screens.rs): `main`, or one opened with `window.new`.
+    name: String,
     runtime: Option<Rc<ShellRuntime>>,
     chrome: Node,
     /// Which layout `chrome` is (`layouts/<name>.json`).
@@ -457,19 +481,26 @@ pub struct AppWindow {
     /// Remembers where the window is (`place.rs`); the write waiting to settle.
     _place: Option<Subscription>,
     place_write: Option<Task<()>>,
+    /// Main: every space and tab id its model has had (`prune_screens`).
+    known_ids: HashSet<String>,
 }
 
 impl AppWindow {
-    pub fn new(core: Arc<Core>, requests: async_channel::Receiver<Request>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let runtime = ShellRuntime::new(cx).map_err(|e| tracing::error!("script runtime failed, mods are off: {e:#}")).ok();
+    pub fn new(core: Arc<Core>, name: String, requests: async_channel::Receiver<Request>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let main = name == crate::screens::MAIN;
+        // One default runtime per process (main's); another window's mods get a VM of their own.
+        let runtime = if main { ShellRuntime::new(cx) } else { ShellRuntime::new_isolated() };
+        let runtime = runtime.map_err(|e| tracing::error!("script runtime failed, mods are off: {e:#}")).ok();
         let file_events = crate::files::watch(&mods::app_dir(), #[cfg(test)] cx.background_executor().clone());
         if let (Some(runtime), Some(events)) = (&runtime, &file_events) {
             runtime.set_source_revision_provider(events.revision_provider());
         }
         mods::note_fonts(cx);
         let seen = std::fs::read_to_string(file("seen.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let view_file = view_file(&name);
         let mut w = AppWindow {
             core,
+            name,
             runtime,
             chrome: default_layout("main"),
             layout_name: "main".into(),
@@ -523,7 +554,7 @@ impl AppWindow {
                 local.connection(true, None, None);
                 [(String::new(), local)].into()
             },
-            initial_view: std::fs::read_to_string(file("view.json")).ok().and_then(|s| serde_json::from_str(&s).ok()),
+            initial_view: std::fs::read_to_string(view_file).ok().and_then(|s| serde_json::from_str(&s).ok()),
             pointer: Point::default(),
             drag_from: None,
             titlebar_applied: None,
@@ -546,10 +577,11 @@ impl AppWindow {
             _focus_lost: None,
             _place: None,
             place_write: None,
+            known_ids: HashSet::new(),
         };
         w._focus_lost = Some(cx.on_focus_lost(window, |this, window, cx| this.restore_focus(window, cx)));
         w._place = Some(cx.observe_window_bounds(window, |this, window, cx| {
-            if let Some(t) = crate::place::changed(window, cx) {
+            if let Some(t) = crate::place::changed(&this.name, window, cx) {
                 this.place_write = Some(t);
             }
         }));
@@ -561,17 +593,25 @@ impl AppWindow {
                 cx.hide();
                 return false;
             }
-            let _ = closing.update(cx, |this, cx| {
+            let Ok(name) = closing.update(cx, |this, cx| {
                 this.drain_documents(window, cx);
                 this.close_mods_now(std::time::Instant::now() + Duration::from_millis(250), window, cx);
-            });
-            crate::place::save(window, cx);
+                this.name.clone()
+            }) else { return true };
+            crate::place::save(&name, window, cx);
+            mods::forget_window(&name);
+            // Main's close quits Herdr; another's spaces show in main again.
+            cx.defer(move |cx| crate::screens::closed(&name, cx));
             true
         });
-        settings::install_themes();
-        crate::programs::install_icons();
+        if main {
+            settings::install_themes();
+            crate::programs::install_icons();
+        }
         w.reload_config(window, cx);
-        install_layouts();
+        if main {
+            install_layouts();
+        }
         let name = mods::shared("layout").and_then(|v| v.as_str().map(str::to_owned)).filter(|n| layout_path(n).exists());
         // A layout whose mods are gone (Zen, T4, ADE after the update took
         // theirs) starts on Herdr's instead of a wall of "did not load".
@@ -728,9 +768,13 @@ impl AppWindow {
                 }
             }
         }));
-        Self::note_core(&w.core);
         w.sync(window, cx);
         w.restore_focus(window, cx);
+        // The app's own screens and kept windows (overlays) open in main only.
+        if !main {
+            return w;
+        }
+        Self::note_core(&w.core);
         // The first time the app opens: the frame's welcome (it sets
         // "frame.welcomed" when you start or skip).
         cx.defer_in(window, |this, window, cx| this.open_kept_windows(window, cx));
@@ -877,6 +921,16 @@ impl AppWindow {
                 Ok(p) => {
                     self.person = p;
                     let _ = std::fs::remove_file(file("settings.error"));
+                    // Windows listed in settings.json: new names open now; gone ones' spaces show in main.
+                    if self.is_main() {
+                        for name in crate::screens::set_listed(self.person.windows.keys().cloned().collect()) {
+                            cx.defer(move |cx| {
+                                if let Err(e) = crate::screens::open(&name, cx) {
+                                    tracing::warn!("{e}");
+                                }
+                            });
+                        }
+                    }
                 }
                 Err(e) => self.report("settings", &e),
             }
@@ -946,7 +1000,7 @@ impl AppWindow {
             fill_ids(&mut chrome, &mut self.model);
         }
         self.file_chrome = chrome.clone();
-        let mut state = read_state(name);
+        let mut state = read_state(name, &self.name);
         if self.layout_file_ok {
             // Clicks on fields the file changed since (an edit while the app
             // was closed or another layout showed, an update) give way.
@@ -1022,7 +1076,7 @@ impl AppWindow {
                 // Coming back from a broken file, the clicks are the saved ones
                 // (what showed meanwhile was only the shipped stand-in).
                 let state = if was_broken {
-                    let mut s = read_state(&self.layout_name);
+                    let mut s = read_state(&self.layout_name, &self.name);
                     s.forget_since_saved(&n);
                     s
                 } else {
@@ -1099,7 +1153,7 @@ impl AppWindow {
             view.preserve_unloaded(saved, |machine| self.documents.get(machine.unwrap_or("")).is_some_and(|s| s.document.is_some()));
         }
         let view = serde_json::to_string_pretty(&view).unwrap_or_default() + "\n";
-        if self.documents.values().any(|s| s.document.is_some()) && view != self.written_view && write_atomic(&file("view.json"), &view) {
+        if self.documents.values().any(|s| s.document.is_some()) && view != self.written_view && write_atomic(&view_file(&self.name), &view) {
             self.written_view = view;
         }
     }
@@ -1123,7 +1177,7 @@ impl AppWindow {
         if text == self.written_state {
             return;
         }
-        let path = state_path(&self.layout_name);
+        let path = state_path(&self.layout_name, &self.name);
         let ok = if state.is_empty() {
             std::fs::remove_file(&path).is_ok() || !path.exists()
         } else {
@@ -1332,10 +1386,12 @@ impl AppWindow {
         self.agent_block().is_some()
     }
 
-    /// The mod listing agents chooses navigation order; model order is the fallback.
+    /// The mod listing agents chooses navigation order; model order is the
+    /// fallback. Only agents in tabs this window shows.
     fn agent_order(&self) -> Vec<String> {
         let m = &self.model;
-        mods::agent_order(m.all_addresses().into_iter().filter(|a| m.status(a).is_some()).collect())
+        let owners = crate::screens::Owners::now();
+        mods::agent_order(&self.name, m.all_addresses().into_iter().filter(|a| m.status(a).is_some() && self.shows_terminal(&owners, a)).collect())
     }
 
     /// The agent an agent block shows: the chosen one while it lives, else the
@@ -1391,6 +1447,9 @@ impl AppWindow {
     /// Creates what's visible, drops what isn't, publishes state, saves, focuses.
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.model.order_spaces();
+        let owners = crate::screens::Owners::now();
+        // What another window shows is never selected here.
+        crate::screens::keep_view(&mut self.model, &owners, &self.name);
         let (model, live) = (&self.model, &self.live);
         self.swapped.retain(|p, a| model.address_of(p).is_some() && live.contains_key(a));
         let (mut terms, mods_visible) = self.visible();
@@ -1410,13 +1469,16 @@ impl AppWindow {
         }
         // Every tab's terminals stay attached (only visible ones are drawn): tab
         // switches are instant and kitty images survive, which a repaint can't bring back.
-        for c in self.model.tabs() {
+        // Only this window's tabs: another window shows (and sizes) the rest.
+        for p in &self.model.spaces {
+            for c in p.tabs.iter().filter(|c| owners.tab(&c.id, &p.id) == self.name) {
             for n in c.root.terminals() {
                 if let Some(a) = n.terminal()
                     && !terms.iter().any(|(id, _)| *id == n.id)
                 {
                     terms.push((n.id.clone(), a.to_owned()));
                 }
+            }
             }
         }
         let want_terms: HashSet<String> = terms.iter().map(|(id, _)| id.clone()).collect();
@@ -1526,6 +1588,7 @@ impl AppWindow {
             self.model.mark_seen(&visible);
         }
         self.share_seen(cx);
+        self.prune_screens();
         self.publish(cx);
         self.save();
         cx.notify();
@@ -1666,7 +1729,7 @@ impl AppWindow {
             copy.error = Some(format!("no mod folder ~/.config/herdr-app/mods/{}", copy.inst.name));
             return copy;
         };
-        copy.id = mods::prepare_load(&copy.inst);
+        copy.id = mods::prepare_load(&copy.inst, &self.name);
         match runtime.try_load(&folder.dir, window, cx) {
             Ok(root) => {
                 if self.file_events.is_none() {
@@ -1777,17 +1840,22 @@ impl AppWindow {
         let machines = self.documents.iter().map(|(name, slot)| json!({
             "name": (!name.is_empty()).then_some(name), "layout": slot.layout(),
         })).collect();
-        let mut changed = mods::publish_machines(Value::Array(machines));
-        changed |= mods::publish_spaces(Value::Array(spaces));
-        changed |= mods::publish_agents(Value::Array(agents));
-        changed |= mods::publish_panes(Value::Array(panes));
-        changed |= mods::publish_focused(focused.unwrap_or(Value::Null));
-        changed |= mods::publish_floats(self.float_placements());
-        changed |= mods::publish_layout(&self.chrome);
+        let w = self.name.as_str();
+        let mut changed = mods::publish_machines(w, Value::Array(machines));
+        changed |= mods::publish_spaces(w, Value::Array(spaces));
+        changed |= mods::publish_agents(w, Value::Array(agents));
+        changed |= mods::publish_panes(w, Value::Array(panes));
+        changed |= mods::publish_focused(w, focused.unwrap_or(Value::Null));
+        changed |= mods::publish_floats(w, self.float_placements());
+        changed |= mods::publish_layout(w, &self.chrome);
+        changed |= mods::publish_screens(w, crate::screens::listing(&crate::screens::Owners::now(), &crate::screens::focused()));
         if changed {
             self.refresh_snapshot_mods(cx);
         }
-        self.write_where(cx);
+        // Labels on core terminals are one per computer: main writes them.
+        if self.is_main() {
+            self.write_where(cx);
+        }
     }
 
     /// Tells the core where each terminal lives, in words: the `where` label,
@@ -1886,7 +1954,10 @@ impl AppWindow {
         if self.draining { return; }
         self.save();
         self.draining = true;
-        QUITTING.store(true, std::sync::atomic::Ordering::SeqCst);
+        // Another window closing alone isn't Herdr quitting.
+        if self.is_main() {
+            QUITTING.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         while let Some(address) = self.pending_terminals.keys().next().cloned() {
             let pending = self.pending_terminals.remove(&address).unwrap();
             let timeout = Duration::from_secs(if address.contains('/') { 2 } else { 10 });
@@ -2043,7 +2114,7 @@ impl AppWindow {
         self.live = live;
         self.closing_terminals.retain(|addr, completed| !*completed || self.live.contains_key(addr));
         // A new sub-agent changes only this list; mods that show teams need to redraw.
-        let terminals_changed = mods::publish_terminals(list);
+        let terminals_changed = mods::publish_terminals(&self.name, list);
         self.tend_terminals(true, window, cx);
         if terminals_changed {
             self.refresh_snapshot_mods(cx);
@@ -2076,10 +2147,14 @@ impl AppWindow {
         }
         self.written_seen.retain(|a, _| self.live.contains_key(a));
         changed |= self.share_seen(cx);
-        // Changes already made before Herdr started aren't news.
+        // Changes already made before Herdr started aren't news. Only the
+        // window showing the agent rings and toasts (agents in no tab: main).
         if self.listed_once {
+            let owners = crate::screens::Owners::now();
             for (addr, alert, looking) in alerts {
-                self.alert(&addr, alert, looking, window, cx);
+                if self.shows_terminal(&owners, &addr) {
+                    self.alert(&addr, alert, looking, window, cx);
+                }
             }
         }
         self.track_folders(cx);
@@ -2146,11 +2221,17 @@ impl AppWindow {
         if QUITTING.load(std::sync::atomic::Ordering::SeqCst) {
             return false;
         }
-        let missing = self.model.tabs().flat_map(|c| c.root.terminals()).chain(self.chrome.terminals())
+        // Each window clears its own tabs (one writer per change), and main adopts.
+        let owners = crate::screens::Owners::now();
+        let own = self.model.spaces.iter().flat_map(|p| p.tabs.iter().filter(|c| owners.tab(&c.id, &p.id) == self.name));
+        let missing = own.flat_map(|c| c.root.terminals()).chain(self.chrome.terminals())
             .filter_map(|n| n.terminal().filter(|a| !self.live.contains_key(*a) && !self.just_born(a)).map(|a| (n.id.clone(), a.to_owned())))
             .collect::<Vec<_>>();
         if !missing.is_empty() && !self.checking_closed {
             self.check_closed(missing, window, cx);
+        }
+        if !self.is_main() {
+            return false;
         }
         let mut orphans = self.live.iter()
             .filter(|(a, _)| self.model.pane_of(a).is_none() && !self.changing_terminals.contains(*a) && !self.closing_terminals.contains_key(*a))
@@ -2190,7 +2271,10 @@ impl AppWindow {
                 if matches!(ready, Ok(true)) && this.model.pane_of(&addr).is_none()
                     && this.require_document(addr.split_once('/').map(|(m, _)| m)).is_ok()
                 {
+                    let new_space = this.model.space(&space).is_none();
+                    let new_tab = tab.as_deref().is_none_or(|t| this.model.tab(t).is_none());
                     this.adopt(&addr, &space, tab.as_deref());
+                    this.claim_adopted(&addr, &space, new_space, new_tab);
                     this.sync(window, cx);
                     this.flush_documents(false, window, cx);
                 }
@@ -2248,7 +2332,9 @@ impl AppWindow {
         let home = mods::home().to_string_lossy().into_owned();
         let mut todo: HashMap<(Option<String>, String), Vec<String>> = HashMap::new();
         let mut moved = false;
-        for (addr, rec) in &self.live {
+        let owners = crate::screens::Owners::now();
+        let mine: HashSet<String> = self.live.keys().filter(|a| self.shows_terminal(&owners, a)).cloned().collect();
+        for (addr, rec) in self.live.iter().filter(|(a, _)| mine.contains(*a)) {
             // Core's live folder of what runs there (any machine), else the shell's (local).
             let cwd = rec
                 .get("foreground")
@@ -2451,6 +2537,7 @@ impl AppWindow {
         if let Some(p) = self.model.space_mut(&space) {
             p.machine = machine;
         }
+        self.claim(&space, None);
         Ok(json!({ "space": space, "tab": ctx, "terminal": addr }))
     }
 
@@ -2468,6 +2555,7 @@ impl AppWindow {
         let (addr, _) = self.spawn(Self::agent_argv(argv.clone(), task, on.as_deref()).or(argv), folder, follow, &space, &ctx, on.as_deref(), size, window)?;
         self.model.add_tab(&space, Tab::new(&ctx, name.trim(), &pane, &addr));
         self.model.active = Some(space.clone());
+        self.claim(&space, Some(&ctx));
         Ok(json!({ "space": space, "tab": ctx, "terminal": addr }))
     }
 
@@ -2485,6 +2573,7 @@ impl AppWindow {
         let (ctx, pane) = (self.model.fresh_id_on("tb", machine.as_deref()), self.model.fresh_id_on("p", machine.as_deref()));
         self.model.add_tab(&space, Tab::with_pane(&ctx, name.trim(), Node::block(pane.clone(), Content::Mod { name: m, props })));
         self.model.active = Some(space.clone());
+        self.claim(&space, Some(&ctx));
         Ok(json!({ "space": space, "tab": ctx, "pane": pane }))
     }
 
@@ -2665,6 +2754,7 @@ impl AppWindow {
                         self.model.split(&target, axis, &pane, &address);
                     } else {
                         self.model.add_tab(&space, Tab::new(&tab, &name, &pane, &address));
+                        self.claim(&space, Some(&tab));
                     }
                 }
                 if let Some(pane) = self.model.pane_of(&address) { self.model.focus_pane(&pane); }
@@ -2807,7 +2897,7 @@ impl AppWindow {
         let Some(command) = crate::commands::find(name) else {
             // `<mod>.<command>` goes to that mod's nextCommand().
             if let Some((m, c)) = name.split_once('.')
-                && mods::send_command(m, c)
+                && mods::send_command(&self.name, m, c)
             {
                 return json!({ "ok": true });
             }
@@ -2888,6 +2978,13 @@ impl AppWindow {
     }
 
     fn dispatch(&mut self, name: &str, a: &Value, person: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // Showing what another Herdr window shows: that window does it, in front.
+        if let Some(other) = self.shown_elsewhere(name, a) {
+            crate::screens::request_to(&other, Request::Run { name: name.to_owned(), args: a.clone() });
+            self.raise(&other, window, cx);
+            self.reply = Some(json!({ "ok": true, "window": other }));
+            return;
+        }
         let active_ctx = self.model.active_tab().map(|c| c.id.clone());
         match name {
             // ---- spaces
@@ -2922,9 +3019,10 @@ impl AppWindow {
                 if !self.model.move_space(id, i as usize) { return self.fail(format!("no space {id:?}")); }
             }
             "space.select" => {
+                // By position among the spaces this window shows.
                 let id = Self::owned(a, "id").or_else(|| {
                     let i = a.get("index").and_then(Value::as_u64)? as usize;
-                    self.model.spaces.get(i.checked_sub(1)?).map(|p| p.id.clone())
+                    self.own_spaces().get(i.checked_sub(1)?).cloned()
                 });
                 match id.filter(|id| self.model.space(id).is_some()) {
                     Some(id) => self.model.active = Some(id),
@@ -2932,10 +3030,11 @@ impl AppWindow {
                 }
             }
             "space.next" | "space.prev" => {
-                let n = self.model.spaces.len();
-                if let Some(i) = self.model.active_index().filter(|_| n > 0) {
+                let own = self.own_spaces();
+                let n = own.len();
+                if let Some(i) = self.model.active.as_ref().and_then(|a| own.iter().position(|s| s == a)).filter(|_| n > 0) {
                     let j = if name == "space.next" { (i + 1) % n } else { (i + n - 1) % n };
-                    self.model.active = Some(self.model.spaces[j].id.clone());
+                    self.model.active = Some(own[j].clone());
                 }
             }
             // ---- tabs
@@ -2989,19 +3088,21 @@ impl AppWindow {
                 // By position among the tabs the lists show (settled ones are put away).
                 let id = Self::owned(a, "id").or_else(|| {
                     let i = a.get("index").and_then(Value::as_u64)? as usize;
-                    self.model.active_space()?.tabs.iter().filter(|c| c.settled.is_none()).nth(i.checked_sub(1)?).map(|c| c.id.clone())
+                    self.own_tabs(self.model.active_space()?).into_iter().filter(|c| c.settled.is_none()).nth(i.checked_sub(1)?).map(|c| c.id.clone())
                 });
                 if !id.is_some_and(|id| self.model.select_tab(&id)) {
                     return self.fail("no such tab");
                 }
             }
             "tab.next" | "tab.prev" => {
+                // Over the space's tabs this window shows.
                 if let Some(p) = self.model.active_space()
-                    && let Some(i) = active_ctx.as_ref().and_then(|c| p.tabs.iter().position(|x| x.id == *c))
+                    && let tabs = self.own_tabs(p)
+                    && let Some(i) = active_ctx.as_ref().and_then(|c| tabs.iter().position(|x| x.id == *c))
                 {
-                    let n = p.tabs.len();
+                    let n = tabs.len();
                     let step = |k: usize| if name == "tab.next" { (i + k) % n } else { (i + n * k - k) % n };
-                    if let Some(id) = (1..n).map(|k| &p.tabs[step(k)]).find(|c| c.settled.is_none()).map(|c| c.id.clone()) {
+                    if let Some(id) = (1..n).map(|k| tabs[step(k)]).find(|c| c.settled.is_none()).map(|c| c.id.clone()) {
                         self.model.select_tab(&id);
                     }
                 }
@@ -3232,6 +3333,11 @@ impl AppWindow {
             // ---- layout
             "layout.switch" => {
                 self.switch_layout(Self::arg(a, "name"), window, cx);
+                // Every window shows the same layout.
+                let name = self.layout_name.clone();
+                for other in crate::screens::open_names().into_iter().filter(|n| *n != self.name) {
+                    crate::screens::request_to(&other, Request::Layout { name: name.clone() });
+                }
                 return;
             }
             "layout.clone" => {
@@ -3319,7 +3425,7 @@ impl AppWindow {
                 if !write_atomic(&layout_path(&name), text) {
                     return self.fail(format!("cannot write layouts/{name}.json"));
                 }
-                let _ = std::fs::remove_file(state_path(&name));
+                remove_states(&name);
                 if name == self.layout_name {
                     self.load_layout(&name);
                     self.apply_look(window, cx);
@@ -3444,7 +3550,8 @@ impl AppWindow {
                 crate::update::relaunch();
                 cx.quit();
             }
-            "window.close" | "window.minimize" | "window.maximize" => return self.window_command(name, window, cx),
+            "window.close" | "window.new" | "window.forget" | "window.move" | "window.raise" => return self.screen_command(name, a, window, cx),
+            "window.minimize" | "window.maximize" => return self.window_command(name, window, cx),
             // Hiding apps is macOS's (bound natively there).
             "app.hide" | "app.hide_others" | "app.show_all" => return,
             other => {
@@ -3690,7 +3797,7 @@ impl AppWindow {
     /// Which copies are on screen, for `<mod>.<command>` (`mods::send_command`).
     fn publish_shown_copies(&self) {
         let (_, shown) = self.visible();
-        mods::set_shown_copies(shown.iter().filter_map(|(s, i)| self.copies.get(s).filter(|c| c.inst == *i)).map(|c| c.id).collect());
+        mods::set_shown_copies(&self.name, shown.iter().filter_map(|(s, i)| self.copies.get(s).filter(|c| c.inst == *i)).map(|c| c.id).collect());
     }
 
     /// Closes an overlay; a kept window stays closed on the next start too.
@@ -3733,7 +3840,7 @@ impl AppWindow {
                 let _ = std::fs::rename(file(name), aside(&file(name), "reset"));
             }
         }
-        let _ = std::fs::remove_file(state_path(&self.layout_name));
+        remove_states(&self.layout_name);
         tracing::warn!("escape hatch: {layout} and keys.json set aside as *.reset-<time>");
         self.watched.keys = None;
         install_layouts();
@@ -3758,6 +3865,13 @@ impl AppWindow {
             Request::Refresh => self.refresh_mods(cx),
             Request::Control { cmd, reply } => {
                 let _ = reply.send(self.control(cmd, window, cx));
+            }
+            Request::To { request, .. } => self.handle(*request, window, cx),
+            Request::Screens => self.screens_changed(window, cx),
+            Request::Layout { name } => {
+                if name != self.layout_name {
+                    self.switch_layout(Some(&name), window, cx);
+                }
             }
         }
     }
@@ -3794,6 +3908,8 @@ impl AppWindow {
                 .chain(self.documents.iter().filter_map(|(m, s)| s.error.as_ref().map(|e| format!("layout {}: {e}", if m.is_empty() { "local" } else { m }))))
                 .collect();
             return json!({
+                "window": self.name,
+                "windows": crate::screens::open_names(),
                 "zoom": round(settings::zoom()),
                 "font_size": round(settings::font_size()),
                 "ui_font_size": round(settings::ui_font_size()),
@@ -3817,6 +3933,7 @@ impl AppWindow {
     /// under the terminal that started them.
     fn world(&self) -> Value {
         let m = &self.model;
+        let owners = crate::screens::Owners::now();
         let children = |addr: &str| -> Vec<String> {
             let mut out: Vec<String> = self
                 .live
@@ -3846,10 +3963,10 @@ impl AppWindow {
                     .iter()
                     .map(|c| {
                         let terms: Vec<Value> = c.root.terminals().iter().filter_map(|n| Some(terminal(&n.id, n.terminal()?))).collect();
-                        json!({ "id": c.id, "name": Model::tab_name(p, c), "active": Some(&c.id) == active.as_ref(), "settled": c.settled.is_some(), "terminals": terms })
+                        json!({ "id": c.id, "name": Model::tab_name(p, c), "active": Some(&c.id) == active.as_ref(), "settled": c.settled.is_some(), "window": owners.tab(&c.id, &p.id), "terminals": terms })
                     })
                     .collect();
-                json!({ "id": p.id, "name": m.space_name(p, &home()), "folder": p.folder, "machine": p.machine, "active": m.active.as_deref() == Some(&p.id), "tabs": tabs })
+                json!({ "id": p.id, "name": m.space_name(p, &home()), "folder": p.folder, "machine": p.machine, "active": m.active.as_deref() == Some(&p.id), "window": owners.space(&p.id), "tabs": tabs })
             })
             .collect();
         json!({ "spaces": spaces, "recent": m.recent })
@@ -3900,9 +4017,10 @@ impl AppWindow {
             // Tell mods now: render publishes window() too, but a mod it refreshes
             // waits for another frame, which an idle window that just lost focus
             // may not draw for a long time.
-            if mods::publish_window(self.window_json(window)) {
+            if mods::publish_window(&self.name, self.window_json(window)) {
                 self.refresh_snapshot_mods(cx);
             }
+            crate::screens::note_focus(&self.name, active);
         }
         let dark = is_dark(window.appearance());
         if dark != self.system_dark {
@@ -4911,7 +5029,7 @@ impl Render for AppWindow {
         }
         self.tick_floats(window);
         self.apply_titlebar(window);
-        if mods::publish_window(self.window_json(window)) {
+        if mods::publish_window(&self.name, self.window_json(window)) {
             self.refresh_snapshot_mods(cx);
         }
         let focused = self.focused_path(window, cx);
@@ -5609,7 +5727,7 @@ mod tests {
         let requests = crate::mods::install_policy();
         crate::mods::set_shared("layout".into(), json!("test"));
         crate::mods::set_shared("frame.welcomed".into(), json!("test"));
-        let (view, cx) = cx.add_window_view(|window, cx| super::AppWindow::new(crate::hc::offline(), requests, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| super::AppWindow::new(crate::hc::offline(), crate::screens::MAIN.into(), requests, window, cx));
         assert_eq!(view.update(cx, |this, _| this.layout_name.clone()), "test");
         (view, cx)
     }

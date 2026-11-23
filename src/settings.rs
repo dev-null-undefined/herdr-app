@@ -404,6 +404,11 @@ pub struct Person {
     pub theme: Option<crate::layout::ThemeChoice>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub colors: BTreeMap<String, String>,
+    /// Herdr windows that open at every start besides main (screens.rs), by
+    /// name: `{ "left": { "monitor": "desc:…" } }`. The app reads the names;
+    /// what each holds is the window rules' (Hyprland's `monitor`).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub windows: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -460,6 +465,7 @@ impl Default for Person {
             appearance: Appearance::System,
             theme: None,
             colors: BTreeMap::new(),
+            windows: BTreeMap::new(),
         }
     }
 }
@@ -941,7 +947,7 @@ mod tests {
     /// settings.json key.
     #[test]
     fn the_guide_explains_every_setting() {
-        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
+        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), windows: [("left".into(), serde_json::json!({}))].into(), ..Person::default() };
         let keys: Vec<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().cloned().collect();
         let guide = include_str!("../defaults/AGENTS.md");
         let section = guide.split("## The person").nth(1).and_then(|s| s.split("\n## ").next()).unwrap_or_default();

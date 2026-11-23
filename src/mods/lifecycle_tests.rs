@@ -223,7 +223,7 @@ export default class extends View {
     let seen = Rc::new(RefCell::new(Vec::new()));
     let calls = seen.clone();
     gpui_shell::policy::set_default(Policy::new()
-        .with_host_module(module(Instance { name: "test".into(), props: Value::Null }, 0)).unwrap()
+        .with_host_module(module(Instance { name: "test".into(), props: Value::Null }, 0, "main")).unwrap()
         .with_host_module(HostModule::new("fixture").function("note", move |a| {
             calls.borrow_mut().push(a.string(0)?.to_owned());
             Ok(HostValue::Null)
@@ -263,7 +263,7 @@ export default class extends View {
     let notes = Rc::new(RefCell::new(Vec::new()));
     let calls = notes.clone();
     gpui_shell::policy::set_default(Policy::new()
-        .with_host_module(module(Instance { name: "focus-test".into(), props: Value::Null }, 42)).unwrap()
+        .with_host_module(module(Instance { name: "focus-test".into(), props: Value::Null }, 42, "main")).unwrap()
         .with_host_module(HostModule::new("fixture").function("note", move |a| {
             calls.borrow_mut().push(a.string(0)?.to_owned());
             Ok(HostValue::Null)
@@ -272,14 +272,14 @@ export default class extends View {
     let window = cx.add_window(|window, cx| Mounted(runtime.try_load(&fixture.0, window, cx).unwrap()));
     let mut visual = VisualTestContext::from_window(*window.deref(), cx);
     visual.run_until_parked();
-    set_shown_copies([42].into());
+    set_shown_copies("main", [42].into());
     assert!(send_command_to(42, "focus"));
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
     visual.simulate_keystrokes("down up");
     visual.run_until_parked();
     assert_eq!(*notes.borrow(), vec!["focus", "down", "up"]);
-    set_shown_copies(Default::default());
+    set_shown_copies("main", Default::default());
 }
 
 #[gpui::test]

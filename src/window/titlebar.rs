@@ -84,6 +84,9 @@ impl AppWindow {
             "maximized": window.is_maximized(),
             "fullscreen": window.is_fullscreen(),
             "active": self.window_active,
+            // Which Herdr window this is (screens()).
+            "name": self.name,
+            "main": self.is_main(),
         })
     }
 
@@ -197,12 +200,8 @@ impl AppWindow {
 
     pub(super) fn window_command(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         match name {
-            "window.close" => {
-                self.drain_documents(window, cx);
-                self.close_mods_now(std::time::Instant::now() + Duration::from_millis(250), window, cx);
-                crate::place::save(window, cx);
-                window.remove_window();
-            }
+            // This Herdr window (main's quits).
+            "window.close" => self.close_now(window, cx),
             "window.minimize" => window.minimize_window(),
             #[cfg(windows)]
             "window.maximize" => win::toggle_maximize(window),
