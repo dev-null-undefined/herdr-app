@@ -206,6 +206,16 @@ impl AppWindow {
         }
     }
 
+    /// The look (theme, text size) is the whole app's: what this window just
+    /// changed of it goes to every other open window (main keeps it in its clicks).
+    pub(super) fn share_look(&self) {
+        let look = serde_json::to_value(&self.chrome.look).unwrap_or(Value::Null);
+        let pick = serde_json::to_value(&self.picked_theme).unwrap_or(Value::Null);
+        for other in screens::open_names().into_iter().filter(|n| *n != self.name) {
+            screens::request_to(&other, Request::Look { look: look.clone(), pick: pick.clone() });
+        }
+    }
+
     /// Brings a window to the front (this one directly: it's being updated).
     pub(super) fn raise(&self, name: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if name == self.name {

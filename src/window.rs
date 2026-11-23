@@ -189,11 +189,41 @@ fn state_path(name: &str, screen: &str) -> PathBuf {
 }
 
 /// The clicks on a layout in a window (layout_sync.rs), none if unreadable. A
-/// window's first look at a layout starts from main's clicks.
+/// window's first look at a layout starts from main's clicks, and its look
+/// (theme, text size: the whole app's) is always main's.
 fn read_state(name: &str, screen: &str) -> layout_sync::State {
+    let load = |path: PathBuf| -> layout_sync::State {
+        std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+    };
+    let main = load(state_path(name, crate::screens::MAIN));
+    if screen == crate::screens::MAIN {
+        return main;
+    }
     let own = state_path(name, screen);
-    let path = if own.exists() { own } else { state_path(name, crate::screens::MAIN) };
-    std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+    let mut state = if own.exists() { load(own) } else { main.clone() };
+    with_look_of(&mut state, &main);
+    state
+}
+
+/// `state` with `main`'s look: its theme pick and text sizes.
+fn with_look_of(state: &mut layout_sync::State, main: &layout_sync::State) {
+    state.theme = main.theme.clone();
+    for (id, n) in state.nodes.iter_mut() {
+        n.font_size = main.nodes.get(id).and_then(|m| m.font_size);
+    }
+    for (id, m) in main.nodes.iter().filter(|(_, m)| m.font_size.is_some()) {
+        state.nodes.entry(id.clone()).or_default().font_size = m.font_size;
+    }
+}
+
+/// What another window keeps of its clicks: no look (main's is everyone's).
+fn without_look(mut state: layout_sync::State) -> layout_sync::State {
+    state.theme = None;
+    for n in state.nodes.values_mut() {
+        n.font_size = None;
+    }
+    state.nodes.retain(|_, n| *n != layout_sync::NodeState::default());
+    state
 }
 
 /// Every window's clicks on a layout go (a reset).
@@ -1179,7 +1209,7 @@ impl AppWindow {
     /// Writes the clicks, with the file they were made on (so a later change
     /// to the file can win over them).
     fn write_state(&mut self, state: &layout_sync::State) {
-        let mut state = state.clone();
+        let mut state = if self.is_main() { state.clone() } else { without_look(state.clone()) };
         if !state.is_empty() {
             state.file = serde_json::to_value(&self.file_chrome).ok();
         }
@@ -3384,6 +3414,7 @@ impl AppWindow {
                 state.apply(&mut self.chrome);
                 self.picked_theme = state.theme;
                 self.apply_look(window, cx);
+                self.share_look();
             }
             // A deliberate edit: the file becomes this tree, clicks start over.
             "layout.set" => match serde_json::from_value::<Node>(a.get("layout").cloned().unwrap_or_default()) {
@@ -3400,6 +3431,7 @@ impl AppWindow {
                     self.picked_theme = None;
                     self.write_state(&layout_sync::State::default());
                     self.apply_look(window, cx);
+                    self.share_look();
                 }
                 Err(e) => return self.fail(format!("layout: {e}")),
             },
@@ -3542,11 +3574,7 @@ impl AppWindow {
                 self.picked_theme = self.chrome.look.theme.clone();
                 self.save();
                 self.apply_look(window, cx);
-                // The theme is the app's: every window picks it, or they'd take turns setting theirs.
-                let pick = serde_json::to_value(&self.picked_theme).unwrap_or(Value::Null);
-                for other in crate::screens::open_names().into_iter().filter(|n| *n != self.name) {
-                    crate::screens::request_to(&other, Request::Theme { pick: pick.clone() });
-                }
+                self.share_look();
             }
             "app.zoom_in" | "app.zoom_out" | "app.zoom_reset" => {
                 let zoom = settings::next_zoom(match name {
@@ -3888,10 +3916,11 @@ impl AppWindow {
                     self.switch_layout(Some(&name), window, cx);
                 }
             }
-            Request::Theme { pick } => {
+            Request::Look { look, pick } => {
                 let pick: Option<crate::layout::ThemeChoice> = serde_json::from_value(pick).ok().flatten();
-                if pick.is_some() && pick != self.picked_theme {
-                    self.chrome.look.theme = pick.clone();
+                let Ok(look) = serde_json::from_value::<crate::layout::Look>(look) else { return };
+                if look != self.chrome.look || pick != self.picked_theme {
+                    self.chrome.look = look;
                     self.picked_theme = pick;
                     self.save();
                     self.apply_look(window, cx);
@@ -5699,6 +5728,27 @@ mod tests {
                 assert_eq!(bounds.origin, point(px(100.0), px(200.0)));
             }
         }
+    }
+
+    #[test]
+    fn another_window_shows_mains_look_and_keeps_only_its_own_clicks() {
+        use crate::layout::{Size, ThemeChoice};
+        use crate::layout_sync::{NodeState, State};
+        let mut main = State { theme: Some(ThemeChoice::One("ink".into())), ..Default::default() };
+        main.nodes.insert("root".into(), NodeState { font_size: Some(18.0), ..Default::default() });
+        let mut left = State { theme: Some(ThemeChoice::One("paper".into())), ..Default::default() };
+        left.nodes.insert("root".into(), NodeState { font_size: Some(12.0), ..Default::default() });
+        left.nodes.insert("sidebar".into(), NodeState { size: Some(Size::Px { px: 320.0 }), font_size: Some(9.0), ..Default::default() });
+        super::with_look_of(&mut left, &main);
+        assert_eq!(left.theme, main.theme);
+        assert_eq!(left.nodes["root"].font_size, Some(18.0));
+        assert_eq!(left.nodes["sidebar"].font_size, None);
+        assert_eq!(left.nodes["sidebar"].size, Some(Size::Px { px: 320.0 }));
+        // What it writes keeps its sizes, never a look.
+        let own = super::without_look(left);
+        assert_eq!(own.theme, None);
+        assert!(!own.nodes.contains_key("root"));
+        assert_eq!(own.nodes["sidebar"], NodeState { size: Some(Size::Px { px: 320.0 }), ..Default::default() });
     }
 
     #[test]
