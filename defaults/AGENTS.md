@@ -170,7 +170,7 @@ the highlighted line shows where it will land.
 ## Herdr windows
 
 One Herdr can show several windows (one per monitor, say), each listing only
-its own spaces. `main` is the first and always open; closing it quits Herdr.
+its own spaces. `main` is the first and always open; closing it quits Herdr (on macOS it only closes, as before).
 Others are listed in settings.json `windows` (they open at every start) or
 made on the fly with `window.new {name}` (kept, closed or not, until
 `window.forget`). Main's title is `Herdr`, another's `Herdr · <name>`, so window rules can place each;
@@ -697,7 +697,7 @@ The main ones:
   explicitly forget the old identity and pair again with the same name and target.
   Other unreachable machines don't offer this.
 - Window: `window.minimize`, `window.maximize` (or back), `window.close {name?}`
-  (default: this one; main's quits Herdr).
+  (default: this one; main's quits Herdr, except on macOS, where it only closes, as before).
 - Herdr windows (see Herdr windows): `window.new {name, focus?}` (opens it, or
   brings it to the front unless `focus: false`), `window.raise {name}`,
   `window.forget {name}` (one made on the fly: its spaces show in main),

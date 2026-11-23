@@ -1166,6 +1166,12 @@ impl AppWindow {
         if QUITTING.load(std::sync::atomic::Ordering::SeqCst) {
             return;
         }
+        self.save_now();
+    }
+
+    /// `save` even while quitting: each window's last save, as it drains
+    /// (whichever window set `QUITTING` first).
+    fn save_now(&mut self) {
         self.note_pane_folders();
         let mut state = layout_sync::State::between(&self.file_chrome, &self.chrome);
         state.theme = self.picked_theme.clone();
@@ -1996,7 +2002,7 @@ impl AppWindow {
     /// Finish the accepted edit and any newer projection before the window goes.
     pub fn drain_documents(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.draining { return; }
-        self.save();
+        self.save_now();
         self.draining = true;
         // Another window closing alone isn't Herdr quitting.
         if self.is_main() {

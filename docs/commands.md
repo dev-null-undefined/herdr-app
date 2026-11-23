@@ -555,7 +555,7 @@ No arguments.
 
 ## `window.close`
 
-Close a Herdr window (default: this one). Closing main quits Herdr (every window); another's spaces show in main until it opens again.
+Close a Herdr window (default: this one). Closing main quits Herdr (every window; on macOS it closes only main, as before); another's spaces show in main until it opens again.
 
 | Argument | Required |
 |---|---|

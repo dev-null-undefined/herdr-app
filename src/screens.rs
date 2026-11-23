@@ -556,7 +556,10 @@ pub fn closed(name: &str, cx: &mut App) {
     OPEN.with_borrow_mut(|o| o.retain(|w| w.name != name));
     FOCUS.with_borrow_mut(|f| f.retain(|n| n != name));
     if name == MAIN {
-        cx.quit();
+        // macOS: an app lives on without its windows (the Dock, Cmd+Q), as before windows.
+        if !cfg!(target_os = "macos") {
+            cx.quit();
+        }
         return;
     }
     // A forgotten window has no entry left to mark.
