@@ -555,9 +555,47 @@ No arguments.
 
 ## `window.close`
 
-Close the window (on Linux, quits).
+Close a Herdr window (default: this one). Closing main quits Herdr (every window); another's spaces show in main until it opens again.
 
-No arguments.
+| Argument | Required |
+|---|---|
+| `name` | no |
+
+## `window.new`
+
+Open another Herdr window (one process, one home) by name, or bring it to the front if open (focus false: don't). A name not in settings.json `windows` is kept until window.forget. Its title is `Herdr · <name>`.
+
+| Argument | Required |
+|---|---|
+| `name` | yes |
+| `focus` | no |
+
+## `window.forget`
+
+Forget a window made on the fly (closing it if open): its spaces and tabs show in main.
+
+| Argument | Required |
+|---|---|
+| `name` | yes |
+
+## `window.move`
+
+Show a space (kind "space", with its tabs), a tab ("tab", alone: it stays in its space) or the spaces of a machine this window shows ("machine", id "" for this computer) in window `to`, at position index (1 = first) among what `to` shows there. Nothing restarts.
+
+| Argument | Required |
+|---|---|
+| `kind` | yes |
+| `id` | yes |
+| `to` | yes |
+| `index` | no |
+
+## `window.raise`
+
+Bring an open Herdr window to the front.
+
+| Argument | Required |
+|---|---|
+| `name` | yes |
 
 ## `window.minimize`
 

@@ -95,6 +95,23 @@ worker. Use app commands when the
 user wants to see a new tab or split, hc for orchestration that need not change
 the screen.
 
+## Several windows
+
+One Herdr can show several windows (one per monitor, say), each listing only
+its own spaces; `herdr-app ls` names the window that shows each space and tab.
+`do` runs in the window that shows your terminal's tab (the client sends
+`$HC_TERMINAL_ID`), so a new space or tab lands beside you; a labelled
+terminal you start lands in the window of its parent. Without either, `do`
+runs in the window used last; `status`, `ls` and `shot` describe main.
+`--window <name>` picks one:
+
+```sh
+herdr-app status --window left
+herdr-app do window.move --kind space --id sp12 --to left
+```
+
+Open, close and move windows only when the person asks.
+
 ## Customize layouts, keys, or mods
 
 First read `~/.config/herdr-app/AGENTS.md` (or `$HERDR_APP_HOME/AGENTS.md` if

@@ -82,8 +82,8 @@ first frame or during GPU recovery it reports an error instead of a PNG.
 | `programs.json` | how programs show (name, icon, tile), on top of the built-in table | live |
 | `icons/` | the shipped program icons | written by Herdr (put your own elsewhere) |
 | `frame/` | the app's own screens (welcome, ...) | rewritten by Herdr on every start: don't edit, it won't stick |
-| `view.json` | this screen's selected space/tab/pane, zoom, settled tabs, recent spaces and seen attention | written by Herdr |
-| `shared.json`, `data/`, `seen.json`, `installed.json`, `window.json`, `windows.json` | mod state, bookkeeping, where the window was (size, maximized), mods' windows (spots, kept ones) | written by Herdr |
+| `view.json` | this screen's selected space/tab/pane, zoom, settled tabs, recent spaces and seen attention (main's; another Herdr window's is `view-<name>.json`) | written by Herdr |
+| `shared.json`, `data/`, `seen.json`, `installed.json`, `window.json`, `windows.json` | mod state, bookkeeping, where the window was (size, maximized; another Herdr window's: `window-<name>.json`), mods' windows (spots, kept ones) | written by Herdr |
 
 Shared state is saved atomically in the background, with the latest change winning.
 If `shared.json` is invalid, Herdr logs a warning and keeps it as
@@ -166,6 +166,43 @@ the highlighted line shows where it will land.
 - **Agent navigation order** belongs to the mods. A mod displaying agents calls
   `setAgentOrder(list.map(a => a.address))` on render so `agent.next` /
   `agent.prev` follow its list.
+
+## Herdr windows
+
+One Herdr can show several windows (one per monitor, say), each listing only
+its own spaces. `main` is the first and always open; closing it quits Herdr.
+Others are listed in settings.json `windows` (they open at every start) or
+made on the fly with `window.new {name}` (kept, closed or not, until
+`window.forget`). Each title is `Herdr · <name>`, so window rules can place it;
+the app id stays `herdr-app`.
+
+- Who shows what is shared.json `screens`:
+  `{ "left": { "spaces": ["sp1", "box/sp2"], "tabs": ["tb7"], "adhoc": true, "closed": true } }`.
+  A space in no list, or held by a window that isn't open, shows in main. A tab
+  in no list shows where its space does; a listed tab was pulled out of its
+  space and shows alone in that window (its space stays where it is).
+  `window.move {kind: "space" | "tab" | "machine", id, to, index?}` changes it;
+  nothing running restarts (a moved terminal's view redraws from the core:
+  its scroll position, search and selection don't come along).
+- A space or tab shows in the window that made it: a `space.new` or `tab.new`
+  from a terminal lands in that terminal's window, a labelled terminal in its
+  parent's.
+- Each window has its own selection, pane zoom, settled tabs, recent spaces,
+  seen attention, layout clicks (`layouts/.state/<layout>@<name>.json`; main's
+  are `<layout>.json`) and spot on screen, and its own copy of every mod.
+  Settings, keys, layouts, the UI zoom, themes and shared state are everyone's;
+  `layout.switch` switches every window.
+- Only the window showing an agent rings and toasts for it (agents in no tab:
+  main). `space.next`/`prev`, `space.select {index}`, `tab.next`/`prev`,
+  `tab.select {index}` and `agent.next`/`prev` count only this window's.
+  `space.select`, `tab.select`, `pane.focus` and `agent.focus` on what another
+  window shows run there and bring it to the front.
+- `herdr-app do` runs in the window showing the caller's tab (it sends
+  `$HC_TERMINAL_ID`), else in the window used last; `status`, `ls` and `shot`
+  describe main. `--window <name>` picks one. `ls` names each space's and
+  tab's `window`.
+- Mods: `window()` says which window a copy is in (`name`, `main`);
+  `screens()` lists every window with what it holds, open or not.
 
 ## Layouts: `layouts/<name>.json`
 
@@ -635,7 +672,19 @@ The main ones:
   or replaced and a different core answers there, its sidebar offers Connect:
   explicitly forget the old identity and pair again with the same name and target.
   Other unreachable machines don't offer this.
-- Window: `window.minimize`, `window.maximize` (or back), `window.close`.
+- Window: `window.minimize`, `window.maximize` (or back), `window.close {name?}`
+  (default: this one; main's quits Herdr).
+- Herdr windows (see Herdr windows): `window.new {name, focus?}` (opens it, or
+  brings it to the front unless `focus: false`), `window.raise {name}`,
+  `window.forget {name}` (one made on the fly: its spaces show in main),
+  `window.move {kind, id, to, index?}` (a space with its tabs, one tab alone, or
+  the spaces of a machine this window shows, `id: ""` for this computer; `index`:
+  1 = first among what `to` shows there).
+
+  ```sh
+  herdr-app do window.new --name left
+  herdr-app do window.move '{"kind":"space","id":"sp12","to":"left"}'
+  ```
 - macOS: `app.quit`, `app.hide`, `app.hide_others`, `app.show_all`.
 
 When the user runs a command without a required name (a key, a click), Herdr
@@ -683,6 +732,11 @@ What's about the user, never a look:
   The theme picker overrides any layout and stays on that layout.
 - `colors`: theme color overrides (`{"accent":"#ff8800"}`), with the same
   precedence as fonts.
+- `windows`: Herdr windows besides main that open at every start, by name:
+  `{ "left": { "monitor": "desc:<make> <model> <serial>" } }`. Herdr reads
+  the names; the rest is for the person's window rules (Hyprland places
+  `Herdr · left` on that monitor). A name taken out closes that window; its
+  spaces show in main.
 - `appearance`: `"light"` or `"dark"` always; absent, the system's. A layout
   with a light and a dark theme shows the matching one.
 - Updates: an installed app downloads them by itself and offers Restart and
@@ -963,6 +1017,10 @@ The full surface is in `gpui-kit.d.ts` next to this file.
 
 All of it is in `herdr.d.ts`. In short:
 
+- Herdr windows: `window()` (`name`, `main`: which window this copy is in),
+  `screens()` (every window: `name`, `main`, `kind` ("listed" | "adhoc"),
+  `open`, `focused`, `spaces`, `tabs`). `spaces()` lists every space, other
+  windows' too: filter with `screens()` (see Herdr windows).
 - Live data: `spaces()` (each with its tabs, status, name, named, folder,
   machine, branch), `machines()` (name, null for this computer; layout:
   `loading`, `ready`, or `unavailable` on this connection; loading ends on
