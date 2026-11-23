@@ -37,9 +37,13 @@ impl AppWindow {
         }
     }
 
-    /// A space or tab this window just made shows here.
+    /// A space or tab this window just made shows here (recorded only once
+    /// windows started, and in main's list only once main's list is made).
     pub(super) fn claim(&mut self, space: &str, tab: Option<&str>) {
         let mut held = screens::read();
+        if !screens::recording() || (self.is_main() && !held.contains_key(MAIN)) {
+            return;
+        }
         if screens::claim(&mut held, &Owners::now(), &self.model, space, tab, &self.name) {
             screens::write(&held);
         }
@@ -57,6 +61,9 @@ impl AppWindow {
         let Some(to) = parent.and_then(|p| self.window_of(&owners, p)).map(str::to_owned) else { return };
         let tab = self.model.pane_of(addr).and_then(|p| self.model.tab_of(&p)).map(|t| t.id.clone());
         let mut held = screens::read();
+        if !screens::recording() || (to == MAIN && !held.contains_key(MAIN)) {
+            return;
+        }
         let tab = if new_space { None } else { tab.as_deref() };
         if screens::claim(&mut held, &owners, &self.model, space, tab, &to) {
             screens::write(&held);
@@ -77,6 +84,7 @@ impl AppWindow {
         if !self.is_main() {
             return;
         }
+        self.seed_main_list();
         let ids: Vec<String> = self.model.spaces.iter().flat_map(|p| std::iter::once(p.id.clone()).chain(p.tabs.iter().map(|t| t.id.clone()))).collect();
         self.known_ids.extend(ids);
         let gone = |id: &String| self.known_ids.contains(id) && self.model.space(id).is_none() && self.model.tab(id).is_none();
@@ -87,6 +95,21 @@ impl AppWindow {
             h.tabs.retain(|t| !gone(t));
         }
         if held != before {
+            screens::write(&held);
+        }
+    }
+
+    /// Once windows start, main lists every space it shows (`screens::seed_main`),
+    /// when it has every machine's spaces it can get.
+    fn seed_main_list(&mut self) {
+        if !screens::recording() || !self.machines_seen {
+            return;
+        }
+        if self.documents.values().any(|s| s.available && s.document.is_none()) {
+            return;
+        }
+        let mut held = screens::read();
+        if screens::seed_main(&mut held, &self.model) {
             screens::write(&held);
         }
     }

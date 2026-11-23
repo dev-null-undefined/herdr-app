@@ -514,6 +514,8 @@ pub struct AppWindow {
     place_write: Option<Task<()>>,
     /// Main: every space and tab id its model has had (`prune_screens`).
     known_ids: HashSet<String>,
+    /// The core listed the machines at least once (their documents can load).
+    machines_seen: bool,
     /// The copy whose drag this window handed to the platform (drag.rs), and
     /// the copy a platform drag is over here now.
     drag_out: Option<u64>,
@@ -613,6 +615,7 @@ impl AppWindow {
             _place: None,
             place_write: None,
             known_ids: HashSet::new(),
+            machines_seen: false,
             drag_out: None,
             drag_over: None,
         };
@@ -2089,6 +2092,7 @@ impl AppWindow {
             }
         }
         if let Some(machines) = machines {
+            self.machines_seen = true;
             // Temporary machines are agents' short-lived sandboxes: the app leaves them out.
             let kept = || machines["machines"].as_array().into_iter().flatten().filter(|m| m["temporary"] != true);
             let states = kept().filter_map(|m| Some((m["name"].as_str()?, m["state"].as_str()?))).collect::<HashMap<_, _>>();

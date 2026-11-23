@@ -51,8 +51,28 @@ pub fn read() -> Screens {
 
 /// Writes the owners; every window takes its share again (`Request::Screens`).
 pub fn write(s: &Screens) {
-    let kept: Screens = s.iter().filter(|(_, h)| **h != Held::default()).map(|(n, h)| (n.clone(), h.clone())).collect();
+    // Main's entry stays, empty or not: it says main's list was made (`seed_main`).
+    let kept: Screens = s.iter().filter(|(n, h)| *n == MAIN || **h != Held::default()).map(|(n, h)| (n.clone(), h.clone())).collect();
     mods::set_shared(KEY.into(), serde_json::to_value(&kept).unwrap_or(Value::Null));
+}
+
+/// Whether owners are recorded: once a second window has existed (shared.json
+/// has `screens`) or settings.json lists one. A person with one window gets no
+/// writes from it.
+pub fn recording() -> bool {
+    mods::shared(KEY).is_some() || !listed().is_empty() || OPEN.with_borrow(|o| o.len() > 1)
+}
+
+/// Main's list, made once when windows start: every space main shows that no
+/// list holds yet, so nothing main shows is up for grabs later. Main's entry
+/// marks it made. False when there was nothing to do.
+pub fn seed_main(held: &mut Screens, model: &Model) -> bool {
+    if held.contains_key(MAIN) {
+        return false;
+    }
+    let spaces = model.spaces.iter().filter(|p| !held.values().any(|h| h.spaces.contains(&p.id))).map(|p| p.id.clone()).collect();
+    held.insert(MAIN.to_owned(), Held { spaces, ..Default::default() });
+    true
 }
 
 pub fn valid(name: &str) -> Result<(), String> {
@@ -404,6 +424,15 @@ pub fn start(core: Arc<crate::hc::Core>, requests: async_channel::Receiver<Reque
     .detach();
     let person = crate::settings::load_person().unwrap_or_default();
     LISTED.set(person.windows.keys().filter(|n| *n != MAIN && valid(n).is_ok()).cloned().collect());
+    // A window taken out of the list while Herdr was off: its spaces join main, as live.
+    let mut held = read();
+    let gone: Vec<String> = held.iter().filter(|(n, h)| *n != MAIN && !h.adhoc && !listed().contains(*n)).map(|(n, _)| n.clone()).collect();
+    if !gone.is_empty() {
+        for name in &gone {
+            hand_to_main(&mut held, name);
+        }
+        write(&held);
+    }
     if let Err(e) = open(MAIN, cx) {
         panic!("cannot open the Herdr window: {e}");
     }
@@ -469,15 +498,18 @@ pub fn open(name: &str, cx: &mut App) -> Result<(), String> {
         return Ok(());
     }
     let core = CORE.with_borrow(Clone::clone).ok_or("Herdr isn't connected to its core yet")?;
-    let mut held = read();
-    let was = held.clone();
-    let entry = held.entry(name.to_owned()).or_default();
-    entry.closed = false;
-    if name != MAIN && !listed().contains(name) {
-        entry.adhoc = true;
-    }
-    if held != was {
-        write(&held);
+    // Main has no entry of its own until windows start (`seed_main`).
+    if name != MAIN {
+        let mut held = read();
+        let was = held.clone();
+        let entry = held.entry(name.to_owned()).or_default();
+        entry.closed = false;
+        if !listed().contains(name) {
+            entry.adhoc = true;
+        }
+        if held != was || mods::shared(KEY).is_none() {
+            write(&held);
+        }
     }
     let (tx, rx) = async_channel::unbounded();
     OPEN.with_borrow_mut(|o| o.push(Open { name: name.to_owned(), tx, handle: None }));
@@ -536,19 +568,17 @@ pub fn forget(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// A forgotten window's spaces and tabs go to main's lists (placed, not
-/// up for grabs). False when it had no entry.
+/// A forgotten (or no longer listed) window's spaces go to main's list:
+/// placed, not up for grabs. Its pulled-out tabs go home with their spaces,
+/// as when it closes. Before main's list is made, `seed_main` takes them.
+/// False when it had no entry.
 fn hand_to_main(held: &mut Screens, name: &str) -> bool {
     let Some(gone) = held.remove(name) else { return false };
-    let main = held.entry(MAIN.to_owned()).or_default();
-    for s in gone.spaces {
-        if !main.spaces.contains(&s) {
-            main.spaces.push(s);
-        }
-    }
-    for t in gone.tabs {
-        if !main.tabs.contains(&t) {
-            main.tabs.push(t);
+    if let Some(main) = held.get_mut(MAIN) {
+        for s in gone.spaces {
+            if !main.spaces.contains(&s) {
+                main.spaces.push(s);
+            }
         }
     }
     true
@@ -832,14 +862,32 @@ mod tests {
     }
 
     #[test]
-    fn a_forgotten_windows_spaces_and_tabs_go_to_main() {
+    fn a_forgotten_windows_spaces_go_to_main_and_its_tabs_home() {
         let mut h = held(json!({
             "zed": { "spaces": ["beta", "alpha"], "tabs": ["box/g1"], "adhoc": true, "closed": true },
             "main": { "spaces": ["alpha"] },
         }));
         assert!(hand_to_main(&mut h, "zed"));
-        assert_eq!(serde_json::to_value(&h).unwrap(), json!({ "main": { "spaces": ["alpha", "beta"], "tabs": ["box/g1"] } }));
+        assert_eq!(serde_json::to_value(&h).unwrap(), json!({ "main": { "spaces": ["alpha", "beta"] } }));
         assert!(!hand_to_main(&mut h, "zed"));
+        // Before main's list is made, the seed takes them.
+        let mut h = held(json!({ "zed": { "spaces": ["beta"], "adhoc": true } }));
+        assert!(hand_to_main(&mut h, "zed"));
+        assert!(h.is_empty());
+    }
+
+    #[test]
+    fn main_lists_what_it_shows_once_when_windows_start() {
+        let m = model();
+        let mut h = held(json!({ "left": { "spaces": ["beta"], "adhoc": true } }));
+        assert!(seed_main(&mut h, &m));
+        assert_eq!(h["main"].spaces, vec!["alpha", "box/gamma"]);
+        // Once: later, a space nobody placed stays out of every list.
+        assert!(!seed_main(&mut h, &m));
+        // An empty list still says it was made.
+        let mut h = Screens::new();
+        assert!(seed_main(&mut h, &Model::default()));
+        assert_eq!(serde_json::to_value(&h).unwrap(), json!({ "main": {} }));
     }
 
     #[test]
