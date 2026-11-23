@@ -11,6 +11,7 @@ mod pane_drag;
 mod pane_size;
 mod titlebar;
 mod screen;
+mod drag;
 use screen::view_file;
 
 use crate::layout::{Axis, Background as Paint, Content, Fit, HeaderContent, Kind, Line, Node, PaneFrame, Size as Span};
@@ -483,6 +484,10 @@ pub struct AppWindow {
     place_write: Option<Task<()>>,
     /// Main: every space and tab id its model has had (`prune_screens`).
     known_ids: HashSet<String>,
+    /// The copy whose drag this window handed to the platform (drag.rs), and
+    /// the copy a platform drag is over here now.
+    drag_out: Option<u64>,
+    drag_over: Option<u64>,
 }
 
 impl AppWindow {
@@ -578,6 +583,8 @@ impl AppWindow {
             _place: None,
             place_write: None,
             known_ids: HashSet::new(),
+            drag_out: None,
+            drag_over: None,
         };
         w._focus_lost = Some(cx.on_focus_lost(window, |this, window, cx| this.restore_focus(window, cx)));
         w._place = Some(cx.observe_window_bounds(window, |this, window, cx| {
@@ -5132,6 +5139,7 @@ impl Render for AppWindow {
             .children(tracker)
             .children(win_tracker)
             .child(pane_drag)
+            .child(self.drag_listeners(cx))
             .child(crate::bench::frame_end())
     }
 }

@@ -432,6 +432,42 @@ export function setShared(key: string, value: unknown): null;
  */
 export function nextCommand(): Promise<string>;
 
+/** What a drag between Herdr windows moves: a space, a tab (a chat), or the spaces of a
+ *  machine (`id`: its name as Herdr shows it, "" for this computer). */
+export type DragKind = "space" | "tab" | "machine";
+
+/**
+ * Arms this copy's own drag (raw mouse down/move, after it passed its threshold): while it
+ * is armed and the left button is held, a move out of the window hands it to the system as a
+ * drag between windows, carrying `{ kind, id, from: <this window's name> }` (Wayland only;
+ * elsewhere nothing happens). Disarm when your drag ends by itself (button up inside the
+ * window). Once handed over, this window gets no more mouse moves or the button's release:
+ * the drag ends with an `end` event (`nextDragEvent`), which also disarms it.
+ */
+export function dragArm(drag: { kind: DragKind; id: string }): void;
+export function dragDisarm(): void;
+
+/** A drag between Herdr windows, as one copy sees it (`nextDragEvent`). */
+export type DragEvent =
+  /** Over this copy's block (on entering it and on every move). x, y: logical px from the
+   *  block's top left, as mouse events give them. The source window sends these too when the
+   *  drag comes back over it, so its copy can take its own drag up again. */
+  | { type: "over"; kind: DragKind; id: string; from: string; x: number; y: number }
+  /** Left this copy's block (or the window) without dropping. */
+  | { type: "leave" }
+  /** Dropped on this copy's block. Herdr moves nothing: run window.move yourself. */
+  | { type: "drop"; kind: DragKind; id: string; from: string; x: number; y: number }
+  /** To the copy that armed it: the drag is over. dropped: a Herdr window took it (false:
+   *  cancelled, or let go outside Herdr). */
+  | { type: "end"; dropped: boolean };
+
+/**
+ * Waits for this copy's next drag event: the copy whose block is under the pointer gets
+ * over/leave/drop, the copy that armed the drag gets end.
+ *   cx.spawn(async (cx) => { for (;;) { const e = await nextDragEvent(); ...; cx.notify(); } });
+ */
+export function nextDragEvent(): Promise<DragEvent>;
+
 /**
  * Waits for changes under a folder and returns absolute paths in batches.
  * On Linux, Git-ignored directories and Git's object database are skipped; trees

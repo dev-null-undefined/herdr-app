@@ -572,6 +572,10 @@ thread_local! {
     static LIVE_READS: RefCell<HashMap<u64, (String, Weak<RefCell<LiveReads>>)>> = RefCell::new(HashMap::new());
     static REVISIONS: RefCell<HashMap<String, HashMap<&'static str, u64>>> = RefCell::new(HashMap::new());
     static COPY_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// A drag a copy has going in its window (`dragArm`), by window: (copy, { kind, id }).
+    static ARMED: RefCell<HashMap<String, (u64, Value)>> = RefCell::new(HashMap::new());
+    /// Where each copy's drag events go (`nextDragEvent`).
+    static DRAG_EVENTS: RefCell<HashMap<u64, async_channel::Sender<Value>>> = RefCell::new(HashMap::new());
     static OVERLAY_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
@@ -728,6 +732,7 @@ pub fn set_shown_copies(window: &str, copies: std::collections::HashSet<u64>) {
 
 /// A window closed: what it published goes.
 pub fn forget_window(window: &str) {
+    ARMED.with_borrow_mut(|a| a.remove(window));
     SNAPSHOT.with_borrow_mut(|s| s.remove(window));
     SHOWN_COPIES.with_borrow_mut(|s| s.remove(window));
     AGENT_ORDER.with_borrow_mut(|s| s.remove(window));
@@ -944,6 +949,11 @@ fn module(inst: Instance, copy: u64, window: &str) -> HostModule {
         commands.retain(|(_, _, tx)| !tx.is_closed());
         commands.push((copy, inst.name.clone(), cmd_tx));
     });
+    let (drag_tx, drag_events) = async_channel::unbounded::<Value>();
+    DRAG_EVENTS.with_borrow_mut(|events| {
+        events.retain(|_, tx| !tx.is_closed());
+        events.insert(copy, drag_tx);
+    });
     HostModule::new("herdr")
         .declarations(DECLARATIONS)
         .async_function("exec", |a| {
@@ -1146,6 +1156,48 @@ fn module(inst: Instance, copy: u64, window: &str) -> HostModule {
             let rx = commands.clone();
             Ok(async move { rx.recv().await.map(HostValue::Str).map_err(|_| HostError::new("herdr-app is shutting down")) })
         })
+        .function("dragArm", { let win = win.clone(); move |a| {
+            let drag = arm_spec(&from_host(a.value(0)?)).map_err(HostError::new)?;
+            ARMED.with_borrow_mut(|armed| armed.insert(win.to_string(), (copy, drag)));
+            Ok(HostValue::Null)
+        }})
+        .function("dragDisarm", { let win = win.clone(); move |_| {
+            ARMED.with_borrow_mut(|armed| {
+                if armed.get(&*win).is_some_and(|(c, _)| *c == copy) {
+                    armed.remove(&*win);
+                }
+            });
+            Ok(HostValue::Null)
+        }})
+        .async_function("nextDragEvent", move |_| {
+            let rx = drag_events.clone();
+            Ok(async move { rx.recv().await.map(|v| to_host(&v)).map_err(|_| HostError::new("herdr-app is shutting down")) })
+        })
+}
+
+/// What `dragArm` takes: `{ kind: "space" | "tab" | "machine", id }`.
+fn arm_spec(v: &Value) -> Result<Value, String> {
+    let kind = v.get("kind").and_then(Value::as_str);
+    let id = v.get("id").and_then(Value::as_str);
+    match (kind, id) {
+        (Some(kind @ ("space" | "tab" | "machine")), Some(id)) => Ok(json!({ "kind": kind, "id": id })),
+        _ => Err("dragArm takes { kind: \"space\" | \"tab\" | \"machine\", id: string } (id \"\" for this computer's machine)".into()),
+    }
+}
+
+/// The drag a copy has armed in `window`: (copy, { kind, id }).
+pub fn armed(window: &str) -> Option<(u64, Value)> {
+    ARMED.with_borrow(|armed| armed.get(window).cloned())
+}
+
+/// A drag ended: `window` has none armed any more.
+pub fn disarm(window: &str) {
+    ARMED.with_borrow_mut(|armed| armed.remove(window));
+}
+
+/// Hands a copy a drag event (`nextDragEvent`). False when it's gone.
+pub fn send_drag_event(copy: u64, event: Value) -> bool {
+    DRAG_EVENTS.with_borrow(|events| events.get(&copy).is_some_and(|tx| tx.try_send(event).is_ok()))
 }
 
 /// The runtime's base layer, themed from settings.json.
@@ -1495,6 +1547,34 @@ mod tests {
         crate::persist::write_atomic(&path, "{}").unwrap();
         assert_eq!(std::fs::read(backup).unwrap(), corrupt);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_copy_arms_its_windows_drag_and_gets_its_own_drag_events() {
+        std::thread::spawn(|| {
+            assert!(arm_spec(&json!({ "kind": "tab", "id": "tb1" })).is_ok());
+            assert!(arm_spec(&json!({ "kind": "machine", "id": "" })).is_ok());
+            for bad in [json!({ "kind": "pane", "id": "p1" }), json!({ "kind": "space" }), json!({ "kind": "space", "id": 3 }), json!(null)] {
+                assert!(arm_spec(&bad).unwrap_err().contains("dragArm"), "{bad}");
+            }
+            let inst = Instance { name: "tree".into(), props: Value::Null };
+            let left = module(inst.clone(), 7, "left");
+            let other = module(inst, 8, "left");
+            ARMED.with_borrow_mut(|a| a.insert("left".into(), (7, json!({ "kind": "space", "id": "sp1" }))));
+            assert_eq!(armed("left"), Some((7, json!({ "kind": "space", "id": "sp1" }))));
+            assert_eq!(armed("main"), None);
+            // Events reach the copy they're for, in order; a copy that's gone takes none.
+            assert!(send_drag_event(8, json!({ "type": "over" })));
+            assert!(send_drag_event(8, json!({ "type": "drop" })));
+            let rx = DRAG_EVENTS.with_borrow(|e| e[&8].clone());
+            assert_eq!(rx.len(), 2);
+            drop(other);
+            assert!(!send_drag_event(8, json!({ "type": "leave" })));
+            assert!(!send_drag_event(99, json!({ "type": "leave" })));
+            disarm("left");
+            assert_eq!(armed("left"), None);
+            drop(left);
+        }).join().unwrap();
     }
 
     #[test]

@@ -147,13 +147,13 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
             })
         });
     }
-    for name in ["feedbackPasteImage", "feedbackClearImages", "feedbackAttachImages"] {
+    for name in ["feedbackPasteImage", "feedbackClearImages", "feedbackAttachImages", "dragArm", "dragDisarm"] {
         module = module.function(name, |_| Ok(HostValue::Null));
     }
     module = module.async_function("feedbackPickImages", |_| Ok(async { Ok(HostValue::Array(vec![])) }));
     module = module.async_function("knownAgents", |_| Ok(async { Ok(HostValue::Array(vec![])) }));
     module = module.async_function("pickFolder", |_| Ok(async { Ok(HostValue::Null) }));
-    for name in ["nextCommand", "watchFolder"] {
+    for name in ["nextCommand", "watchFolder", "nextDragEvent"] {
         module = module.async_function(name, |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
     }
     for name in ["exec", "hc", "readTextFile", "writeTextFile", "sendFeedback"] {

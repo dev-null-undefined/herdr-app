@@ -207,6 +207,26 @@ the app id stays `herdr-app`.
   tab's `window`.
 - Mods: `window()` says which window a copy is in (`name`, `main`);
   `screens()` lists every window with what it holds, open or not.
+- Dragging between windows (Wayland): a mod drags in its own window (raw
+  mouse down/move) and, once its drag is under way, calls
+  `dragArm({kind: "space" | "tab" | "machine", id})`. While armed and the
+  left button is held, leaving the window hands the drag to the system,
+  carrying `{kind, id, from}`. The copy whose block is under the pointer, in
+  whichever Herdr window (the source too), gets `over` (x, y from its block's
+  top left, on every move), `leave` and `drop` from `nextDragEvent()`; the
+  copy that armed it gets `end {dropped}`, which disarms it. Herdr moves
+  nothing on a drop: the copy runs `window.move` with the index it works out.
+  `dragDisarm()` when the drag ends inside the window.
+
+  ```js
+  cx.spawn(async (cx) => {
+    for (;;) {
+      const e = await nextDragEvent();
+      if (e.type === "drop") run("window.move", { kind: e.kind, id: e.id, to: window().name, index: this.slotAt(e.y) });
+      cx.notify();
+    }
+  });
+  ```
 
 ## Layouts: `layouts/<name>.json`
 
@@ -1024,7 +1044,8 @@ All of it is in `herdr.d.ts`. In short:
 - Herdr windows: `window()` (`name`, `main`: which window this copy is in),
   `screens()` (every window: `name`, `main`, `kind` ("listed" | "adhoc"),
   `open`, `focused`, `spaces`, `tabs`). `spaces()` lists every space, other
-  windows' too: filter with `screens()` (see Herdr windows).
+  windows' too: filter with `screens()` (see Herdr windows). Drags between
+  windows: `dragArm`, `dragDisarm`, `nextDragEvent()`.
 - Live data: `spaces()` (each with its tabs, status, name, named, folder,
   machine, branch), `machines()` (name, null for this computer; layout:
   `loading`, `ready`, or `unavailable` on this connection; loading ends on
