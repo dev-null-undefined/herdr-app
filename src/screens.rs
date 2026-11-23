@@ -533,22 +533,28 @@ fn route(r: Request, cx: &mut App) {
 }
 
 fn control_target(cmd: &Value, cx: &App) -> Result<String, String> {
+    target(cmd, &open_names(), &focused(), |t| window_of_terminal(t, cx))
+}
+
+/// Which open window a control request is for: the one it names; for a
+/// second launch the one used last; `status`, `ls` and `shot` main; `do` the
+/// one showing the caller's terminal, else the one used last.
+fn target(cmd: &Value, open: &[String], focused: &str, of_terminal: impl Fn(&str) -> Option<String>) -> Result<String, String> {
     if let Some(w) = cmd.get("window").and_then(Value::as_str).filter(|w| !w.is_empty()) {
-        return if is_open(w) { Ok(w.to_owned()) } else { Err(format!("no open window {w:?} (`herdr-app do window.new --name {w}` opens it)")) };
+        return if open.iter().any(|o| o == w) { Ok(w.to_owned()) } else { Err(format!("no open window {w:?} (`herdr-app do window.new --name {w}` opens it)")) };
     }
-    // A second launch: the window used last comes to the front.
     if cmd.get("raise").is_some() {
-        return Ok(focused());
+        return Ok(focused.to_owned());
     }
     if cmd.get("do").is_none() {
         return Ok(MAIN.into());
     }
     if let Some(t) = cmd.get("terminal").and_then(Value::as_str).filter(|t| !t.is_empty())
-        && let Some(w) = window_of_terminal(t, cx)
+        && let Some(w) = of_terminal(t).filter(|w| open.contains(w))
     {
         return Ok(w);
     }
-    Ok(focused())
+    Ok(focused.to_owned())
 }
 
 /// The window showing a terminal's tab (a sub-agent's: its top agent's), by main's model.
@@ -556,4 +562,219 @@ pub fn window_of_terminal(address: &str, cx: &App) -> Option<String> {
     let main = handle(MAIN)?;
     let this = main.read(cx).ok()?;
     this.window_of_terminal(address, &Owners::now())
+}
+
+/// Test windows that are open without a real window behind them.
+#[cfg(test)]
+pub fn note_open(name: &str) {
+    let (tx, _) = async_channel::unbounded();
+    OPEN.with_borrow_mut(|o| {
+        o.retain(|w| w.name != name);
+        o.push(Open { name: name.to_owned(), tx, handle: None });
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Model, Tab};
+
+    fn set(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// alpha (two tabs) and beta (one) here, gamma on box.
+    fn model() -> Model {
+        let mut m = Model::default();
+        m.add_space("alpha", "alpha", "/tmp", Tab::new("a1", "", "pa1", "t1"));
+        m.add_tab("alpha", Tab::new("a2", "", "pa2", "t2"));
+        m.add_space("beta", "beta", "/tmp", Tab::new("b1", "", "pb1", "t3"));
+        m.add_space("box/gamma", "gamma", "/tmp", Tab::new("box/g1", "", "box/pg1", "box/t4"));
+        m.space_mut("box/gamma").unwrap().machine = Some("box".into());
+        m
+    }
+
+    fn held(json: Value) -> Screens {
+        serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn spaces_and_tabs_show_in_the_open_window_holding_them_else_main() {
+        let h = held(json!({
+            "left": { "spaces": ["beta"], "tabs": ["a2"], "adhoc": true },
+            // Listed once, not any more: what it held shows in main.
+            "gone": { "spaces": ["box/gamma"] },
+        }));
+        let o = Owners::new(h.clone(), set(&["main", "left", "gone"]), set(&[]));
+        assert_eq!(o.space("alpha"), "main");
+        assert_eq!(o.space("beta"), "left");
+        assert_eq!(o.space("box/gamma"), "main");
+        // A pulled-out tab shows where it was pulled to; the rest go with their space.
+        assert_eq!(o.tab("a1", "alpha"), "main");
+        assert_eq!(o.tab("a2", "alpha"), "left");
+        assert_eq!(o.tab("b1", "beta"), "left");
+        let m = model();
+        assert!(o.shows(&m, "alpha", "main") && o.shows(&m, "alpha", "left"));
+        assert_eq!(o.spaces_of(&m, "left"), vec!["alpha", "beta"]);
+        assert_eq!(o.spaces_of(&m, "main"), vec!["alpha", "box/gamma"]);
+        assert_eq!(o.of_tab_in(&m, "pa2"), Some("left"));
+        assert_eq!(o.of_tab_in(&m, "t-nowhere"), None);
+        // Left closed: everything it holds shows in main, and it keeps its lists.
+        let closed = Owners::new(h, set(&["main"]), set(&[]));
+        assert_eq!((closed.space("beta"), closed.tab("a2", "alpha")), ("main", "main"));
+        assert_eq!(closed.spaces_of(&m, "left"), Vec::<&str>::new());
+        // A listed window counts without an adhoc mark.
+        let listed = Owners::new(held(json!({ "gone": { "spaces": ["box/gamma"] } })), set(&["main", "gone"]), set(&["gone"]));
+        assert_eq!(listed.space("box/gamma"), "gone");
+    }
+
+    #[test]
+    fn a_window_never_selects_what_another_shows() {
+        let o = Owners::new(held(json!({ "left": { "spaces": ["beta"], "tabs": ["a2"], "adhoc": true } })), set(&["main", "left"]), set(&[]));
+        // Main was on beta, alpha's second tab selected: both are left's now.
+        let mut main = model();
+        main.active = Some("beta".into());
+        main.space_mut("alpha").unwrap().active = Some("a2".into());
+        assert!(keep_view(&mut main, &o, "main"));
+        assert_eq!(main.active.as_deref(), Some("alpha"));
+        assert_eq!(main.space("alpha").unwrap().active.as_deref(), Some("a1"));
+        assert!(!keep_view(&mut main, &o, "main"));
+        // Left shows alpha only through its pulled-out tab.
+        let mut left = model();
+        left.active = Some("box/gamma".into());
+        left.space_mut("alpha").unwrap().active = Some("a1".into());
+        assert!(keep_view(&mut left, &o, "left"));
+        assert_eq!(left.active.as_deref(), Some("alpha"));
+        assert_eq!(left.space("alpha").unwrap().active.as_deref(), Some("a2"));
+        // A window showing nothing selects nothing.
+        let mut right = model();
+        assert!(keep_view(&mut right, &o, "right"));
+        assert_eq!(right.active, None);
+    }
+
+    #[test]
+    fn moves_take_a_space_with_its_tabs_but_leave_tabs_pulled_to_a_third_window() {
+        let m = model();
+        let open = set(&["main", "left", "right"]);
+        let mut h = held(json!({ "left": { "tabs": ["a2"], "adhoc": true }, "right": { "adhoc": true } }));
+        // alpha to right: its tab in left stays there.
+        let o = Owners::new(h.clone(), open.clone(), set(&[]));
+        move_to(&mut h, &o, &m, "space", "alpha", "right", "main").unwrap();
+        assert_eq!(h["right"].spaces, vec!["alpha"]);
+        assert_eq!(h["left"].tabs, vec!["a2"]);
+        // alpha to left: the tab is home with its space again.
+        let o = Owners::new(h.clone(), open.clone(), set(&[]));
+        move_to(&mut h, &o, &m, "space", "alpha", "left", "right").unwrap();
+        assert_eq!((h["left"].spaces.clone(), h["left"].tabs.clone(), h["right"].spaces.clone()), (vec!["alpha".to_owned()], vec![], vec![]));
+        // A tab alone, out and back: the entry goes when it's with its space.
+        let o = Owners::new(h.clone(), open.clone(), set(&[]));
+        move_to(&mut h, &o, &m, "tab", "a1", "main", "left").unwrap();
+        assert_eq!(h["main"].tabs, vec!["a1"]);
+        let o = Owners::new(h.clone(), open.clone(), set(&[]));
+        move_to(&mut h, &o, &m, "tab", "a1", "left", "main").unwrap();
+        assert!(h["main"].tabs.is_empty());
+        // Back to main: no list holds it.
+        let o = Owners::new(h.clone(), open.clone(), set(&[]));
+        move_to(&mut h, &o, &m, "space", "alpha", "main", "left").unwrap();
+        assert!(h.values().all(|w| !w.spaces.contains(&"alpha".to_owned())));
+        // A machine: the spaces of it the window running the move shows, once.
+        let mut h = held(json!({ "left": { "spaces": ["beta"], "adhoc": true } }));
+        let o = Owners::new(h.clone(), open.clone(), set(&[]));
+        move_to(&mut h, &o, &m, "machine", "", "right", "main").unwrap();
+        assert_eq!(h["right"].spaces, vec!["alpha"]);
+        assert_eq!(h["left"].spaces, vec!["beta"]);
+        let o = Owners::new(h.clone(), open.clone(), set(&[]));
+        move_to(&mut h, &o, &m, "machine", "box", "left", "main").unwrap();
+        assert_eq!(h["left"].spaces, vec!["beta", "box/gamma"]);
+        let o = Owners::new(h.clone(), open, set(&[]));
+        assert!(move_to(&mut h, &o, &m, "space", "nope", "left", "main").unwrap_err().contains("no space"));
+        assert!(move_to(&mut h, &o, &m, "machine", "vps", "left", "main").unwrap_err().contains("no spaces on machine"));
+        assert!(move_to(&mut h, &o, &m, "pane", "pa1", "left", "main").unwrap_err().contains("kind"));
+    }
+
+    #[test]
+    fn what_a_window_makes_shows_there() {
+        let mut m = model();
+        let open = set(&["main", "left"]);
+        let mut h = held(json!({ "left": { "adhoc": true } }));
+        // A new space made from left.
+        m.add_space("delta", "", "/tmp", Tab::new("d1", "", "pd1", "t5"));
+        let o = Owners::new(h.clone(), open.clone(), set(&[]));
+        assert!(claim(&mut h, &o, &m, "delta", None, "left"));
+        assert_eq!(h["left"].spaces, vec!["delta"]);
+        // Made from main: nothing to note.
+        let o = Owners::new(h.clone(), open.clone(), set(&[]));
+        assert!(!claim(&mut h, &o, &m, "beta", None, "main"));
+        // A new tab from left in main's alpha is pulled out to left.
+        m.add_tab("alpha", Tab::new("a3", "", "pa3", "t6"));
+        let o = Owners::new(h.clone(), open.clone(), set(&[]));
+        assert!(claim(&mut h, &o, &m, "alpha", Some("a3"), "left"));
+        assert_eq!(h["left"].tabs, vec!["a3"]);
+        // From main into left's delta: pulled out to main.
+        m.add_tab("delta", Tab::new("d2", "", "pd2", "t7"));
+        let o = Owners::new(h.clone(), open.clone(), set(&[]));
+        assert!(claim(&mut h, &o, &m, "delta", Some("d2"), "main"));
+        assert_eq!(h["main"].tabs, vec!["d2"]);
+        // A tab made where its space shows: nothing.
+        m.add_tab("delta", Tab::new("d3", "", "pd3", "t8"));
+        let o = Owners::new(h.clone(), open, set(&[]));
+        assert!(!claim(&mut h, &o, &m, "delta", Some("d3"), "left"));
+    }
+
+    #[test]
+    fn screens_lists_every_window_main_first() {
+        let h = held(json!({
+            "zed": { "spaces": ["beta"], "adhoc": true, "closed": true },
+            "left": { "tabs": ["a2"] },
+            "stale": { "spaces": ["alpha"] },
+        }));
+        let o = Owners::new(h, set(&["main", "left"]), set(&["left"]));
+        let l = listing(&o, "left");
+        let names: Vec<&str> = l.as_array().unwrap().iter().map(|w| w["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["main", "left", "zed"]);
+        assert_eq!(l[0], json!({ "name": "main", "main": true, "kind": "listed", "open": true, "focused": false, "spaces": [], "tabs": [] }));
+        assert_eq!(l[1], json!({ "name": "left", "main": false, "kind": "listed", "open": true, "focused": true, "spaces": [], "tabs": ["a2"] }));
+        assert_eq!(l[2], json!({ "name": "zed", "main": false, "kind": "adhoc", "open": false, "focused": false, "spaces": ["beta"], "tabs": [] }));
+    }
+
+    #[test]
+    fn control_requests_go_to_the_named_window_then_the_callers_then_the_focused() {
+        let open = vec!["main".to_owned(), "left".to_owned()];
+        let of = |t: &str| match t {
+            "t1" => Some("left".to_owned()),
+            "t9" => Some("closed".to_owned()),
+            _ => None,
+        };
+        let go = |cmd: Value| target(&cmd, &open, "left", of);
+        assert_eq!(go(json!({ "do": "space.new", "window": "main", "terminal": "t1" })), Ok("main".into()));
+        assert!(go(json!({ "do": "space.new", "window": "right" })).unwrap_err().contains("no open window"));
+        assert_eq!(go(json!({ "do": "space.new", "terminal": "t1" })), Ok("left".into()));
+        // A terminal in no tab, or in a window that isn't open: the focused one.
+        assert_eq!(target(&json!({ "do": "space.new", "terminal": "t5" }), &open, "main", of), Ok("main".into()));
+        assert_eq!(target(&json!({ "do": "space.new", "terminal": "t9" }), &open, "main", of), Ok("main".into()));
+        // Asking what's on screen means main, unless named.
+        for verb in ["status", "ls", "shot"] {
+            assert_eq!(go(json!({ verb: true, "terminal": "t1" })), Ok("main".into()));
+            assert_eq!(go(json!({ verb: true, "window": "left" })), Ok("left".into()));
+        }
+        // A second launch brings up the window used last.
+        assert_eq!(go(json!({ "raise": true })), Ok("left".into()));
+    }
+
+    #[test]
+    fn window_names_are_short_and_plain() {
+        assert!(valid("left").is_ok() && valid("dp-7_portrait").is_ok());
+        for bad in ["", "a b", "x/y", "Herdr · left", &"x".repeat(33)] {
+            assert!(valid(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_shared_file_keeps_only_what_a_window_holds() {
+        let h = held(json!({ "left": { "spaces": ["beta"], "adhoc": true, "closed": false } }));
+        assert_eq!(serde_json::to_value(&h).unwrap(), json!({ "left": { "spaces": ["beta"], "adhoc": true } }));
+        // An entry from a newer build keeps working.
+        let h: Screens = serde_json::from_value(json!({ "left": { "tabs": ["a2"], "monitor": "DP-7" } })).unwrap();
+        assert_eq!(h["left"].tabs, vec!["a2"]);
+    }
 }
