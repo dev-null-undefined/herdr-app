@@ -204,22 +204,39 @@ pub fn move_to(held: &mut Screens, owners: &Owners, model: &Model, kind: &str, i
         }
         "machine" => {
             let machine = (!id.is_empty()).then_some(id);
-            let of: Vec<String> = model.spaces.iter().filter(|p| p.machine.as_deref() == machine && owners.shows(model, &p.id, from)).map(|p| p.id.clone()).collect();
             if !model.spaces.iter().any(|p| p.machine.as_deref() == machine) {
                 return Err(format!("no spaces on machine {id:?} (\"\": this computer)"));
             }
-            of
+            // What `from` shows of it moves, once: the spaces it holds whole, and
+            // its tabs pulled out of spaces held elsewhere, alone. A third window's stay.
+            let of = model.spaces.iter().filter(|p| p.machine.as_deref() == machine);
+            let pulled: Vec<(String, String)> = of
+                .clone()
+                .filter(|p| owners.space(&p.id) != from)
+                .flat_map(|p| p.tabs.iter().filter(|t| owners.tab(&t.id, &p.id) == from).map(|t| (t.id.clone(), p.id.clone())))
+                .collect();
+            for (tab, space) in pulled {
+                for h in held.values_mut() {
+                    h.tabs.retain(|t| *t != tab);
+                }
+                if owners.space(&space) != to {
+                    held.entry(to.to_owned()).or_default().tabs.push(tab);
+                }
+            }
+            of.filter(|p| owners.space(&p.id) == from).map(|p| p.id.clone()).collect()
         }
         other => return Err(format!("window.move kind is \"space\", \"tab\" or \"machine\", not {other:?}")),
     };
     for space in spaces {
         let tabs: Vec<String> = model.space(&space).map(|p| p.tabs.iter().map(|t| t.id.clone()).collect()).unwrap_or_default();
-        for h in held.values_mut() {
+        // Its tabs pulled out to `to` are home again, and its holder's own
+        // entries for them meant nothing; those in a third window stay.
+        let holder = owners.space(&space).to_owned();
+        for (name, h) in held.iter_mut() {
             h.spaces.retain(|s| *s != space);
-        }
-        // Its tabs pulled out to `to` are home again; those in a third window stay.
-        if let Some(h) = held.get_mut(to) {
-            h.tabs.retain(|t| !tabs.contains(t));
+            if *name == to || *name == holder {
+                h.tabs.retain(|t| !tabs.contains(t));
+            }
         }
         // Main's list too: only a space nobody placed is in no list.
         held.entry(to.to_owned()).or_default().spaces.push(space);
@@ -787,6 +804,37 @@ mod tests {
         assert!(move_to(&mut h, &o, &m, "space", "nope", "left", "main").unwrap_err().contains("no space"));
         assert!(move_to(&mut h, &o, &m, "machine", "vps", "left", "main").unwrap_err().contains("no spaces on machine"));
         assert!(move_to(&mut h, &o, &m, "pane", "pa1", "left", "main").unwrap_err().contains("kind"));
+    }
+
+    #[test]
+    fn a_machine_moves_what_its_window_shows_of_it_and_leaves_a_third_windows_spaces() {
+        // box: sp1 (two tabs) held by right, its t2 pulled out to main; sp2 main's.
+        let mut m = Model::default();
+        m.add_space("box/sp1", "one", "/tmp", Tab::new("box/t1", "", "box/p1", "box/a1"));
+        m.add_tab("box/sp1", Tab::new("box/t2", "", "box/p2", "box/a2"));
+        m.add_space("box/sp2", "two", "/tmp", Tab::new("box/t3", "", "box/p3", "box/a3"));
+        for p in m.spaces.iter_mut() {
+            p.machine = Some("box".into());
+        }
+        let open = set(&["main", "left", "right"]);
+        let mut h = held(json!({
+            "main": { "spaces": ["box/sp2"], "tabs": ["box/t2"] },
+            "right": { "spaces": ["box/sp1"], "adhoc": true },
+            "left": { "adhoc": true },
+        }));
+        let o = Owners::new(h.clone(), open.clone(), set(&[]));
+        move_to(&mut h, &o, &m, "machine", "box", "left", "main").unwrap();
+        // sp2 moves whole, t2 moves alone and stays in sp1, sp1 stays right's.
+        assert_eq!(h["left"].spaces, vec!["box/sp2"]);
+        assert_eq!(h["left"].tabs, vec!["box/t2"]);
+        assert_eq!(h["right"].spaces, vec!["box/sp1"]);
+        assert!(h["main"].spaces.is_empty() && h["main"].tabs.is_empty());
+        let after = Owners::new(h.clone(), open.clone(), set(&[]));
+        assert_eq!((after.tab("box/t2", "box/sp1"), after.tab("box/t1", "box/sp1")), ("left", "right"));
+        // Back to right, where t2's space is: home with it, no entry left.
+        move_to(&mut h, &after, &m, "machine", "box", "right", "left").unwrap();
+        assert_eq!(h["right"].spaces, vec!["box/sp1", "box/sp2"]);
+        assert!(h["left"].tabs.is_empty() && h["left"].spaces.is_empty());
     }
 
     #[test]
