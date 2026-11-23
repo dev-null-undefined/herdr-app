@@ -296,6 +296,11 @@ pub fn set_listed(names: BTreeSet<String>) -> Vec<String> {
     if was == names {
         return Vec::new();
     }
+    // One that left the list closes, unless it was also made on the fly.
+    let held = read();
+    for gone in was.difference(&names).filter(|n| is_open(n) && !held.get(*n).is_some_and(|h| h.adhoc)) {
+        request_to(gone, Request::Run { name: "window.close".into(), args: Value::Null });
+    }
     request_all(|| Request::Screens);
     names.difference(&was).cloned().collect()
 }

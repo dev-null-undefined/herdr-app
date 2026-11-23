@@ -96,10 +96,22 @@ impl AppWindow {
         self.drain_documents(window, cx);
         self.close_mods_now(Instant::now() + Duration::from_millis(250), window, cx);
         crate::place::save(&self.name, window, cx);
+        self.let_go_terminals(cx);
         mods::forget_window(&self.name);
         let name = self.name.clone();
         window.remove_window();
         cx.defer(move |cx| screens::closed(&name, cx));
+    }
+
+    /// Another window closing alone: its terminal streams end here (the
+    /// process goes on), and main attaches what it held.
+    pub(super) fn let_go_terminals(&mut self, cx: &mut Context<Self>) {
+        if self.is_main() {
+            return;
+        }
+        for (_, t) in self.terms.drain() {
+            t.view.read(cx).detach();
+        }
     }
 
     /// The window that shows what a focus command is about, when it's another.

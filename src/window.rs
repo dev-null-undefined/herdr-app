@@ -596,6 +596,7 @@ impl AppWindow {
             let Ok(name) = closing.update(cx, |this, cx| {
                 this.drain_documents(window, cx);
                 this.close_mods_now(std::time::Instant::now() + Duration::from_millis(250), window, cx);
+                this.let_go_terminals(cx);
                 this.name.clone()
             }) else { return true };
             crate::place::save(&name, window, cx);
