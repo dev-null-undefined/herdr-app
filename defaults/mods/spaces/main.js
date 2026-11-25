@@ -5,7 +5,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, machines, panes, run, openOverlay, exec, hc, theme, shared, setShared, watchFolder, window, layout } from "herdr";
+import { spaces, machines, panes, run, openOverlay, exec, hc, theme, shared, setShared, watchFolder, window, layout, screens } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -47,6 +47,25 @@ export function tone(t, status) {
   return t[status] ?? t.unknown;
 }
 
+// The spaces of `sp` that window `me` shows, by `list` (screens()): those with a
+// tab there, or, with no tabs, the space itself. A space or tab is shown where
+// it is listed while that window is open, else where its space is, else in
+// main (as src/screens.rs `Owners`, which space.select and space.move count by).
+// Alone, a window shows every space.
+export function shownHere(sp, list, me) {
+  if (!list?.some((s) => s.name !== me && s.open)) return sp;
+  const main = list.find((s) => s.main)?.name ?? "main";
+  const open = new Set(list.filter((s) => s.open || s.main).map((s) => s.name));
+  const spaceAt = new Map(), tabAt = new Map();
+  for (const s of list) {
+    for (const id of s.spaces ?? []) if (!spaceAt.has(id)) spaceAt.set(id, s.name);
+    for (const id of s.tabs ?? []) if (!tabAt.has(id)) tabAt.set(id, s.name);
+  }
+  const at = (map, id) => (open.has(map.get(id)) ? map.get(id) : null);
+  const space = (id) => at(spaceAt, id) ?? main;
+  return sp.filter((s) => (s.tabs?.length ? s.tabs.some((t) => (at(tabAt, t.id) ?? space(s.id)) === me) : space(s.id) === me));
+}
+
 export default class Spaces extends View {
   init(_props, cx) {
     this.git = {}; // where() -> { name, branch, ahead, behind, repo, linked }, null: not a repo
@@ -73,10 +92,16 @@ export default class Spaces extends View {
     cx.timer.every(250, (cx) => this.checkNew(cx));
   }
 
+  // The spaces this window shows, in order (all of them with one window).
+  own(sp = spaces()) {
+    return shownHere(sp, screens(), window().name);
+  }
+
   checkNew(cx) {
     const now = Date.now();
-    const sp = spaces();
-    for (const s of sp) if (!this.shown.has(s.id)) this.born[s.id] ??= now;
+    const all = spaces();
+    for (const s of all) if (!this.shown.has(s.id)) this.born[s.id] ??= now;
+    const sp = this.own(all);
     const due = this.due(now, sp, panes());
     if (due.size) this.refreshGit(due, cx);
     if (sp.some((s) => !this.shown.has(s.id)) || this.orderingDue(now)) cx.notify();
@@ -254,9 +279,10 @@ export default class Spaces extends View {
       && this.ordering.machines.every(name => machines().some(m => m.name === name && m.layout === "ready"));
   }
 
-  // Spaces in order, each worktree space moved under its main checkout's.
+  // This window's spaces in order, each worktree space moved under its main
+  // checkout's. space.move counts by this window's spaces too.
   ordered() {
-    const sp = spaces(), ps = panes();
+    const sp = this.own(), ps = panes();
     const ready = (w) => this.shown.has(w.id) || where(w, ps) in this.git || Date.now() - (this.born[w.id] ??= Date.now()) > 1500;
     for (const w of sp) if (!this.shown.has(w.id) && ready(w)) this.shown.add(w.id);
     const list = sp.map((w, i) => ({ w, i, g: this.git[where(w, ps)] ?? null }));
@@ -297,12 +323,13 @@ export default class Spaces extends View {
   // The rows, under a header per machine once one isn't this computer.
   grouped(t, collapsed) {
     const rows = this.ordered();
+    const own = this.own();
     const draw = (r) => (collapsed ? this.compact(r, t) : this.row(r, t));
     const remote = [...new Set([...rows.map(r => r.w.machine).filter(Boolean), ...this.machines.map(m => m.name), ...Object.keys(this.reconnecting)])].sort();
     const loading = m => {
       const layout = machines().find(k => k.name === m)?.layout;
       return layout === "loading" || (!layout && this.machines.some(k => k.name === m && k.state === "connected"))
-        || spaces().some(s => (s.machine ?? null) === m && !this.shown.has(s.id));
+        || own.some(s => (s.machine ?? null) === m && !this.shown.has(s.id));
     };
     const loadingRow = m => h_flex().id(`machine-loading-${m ?? "local"}`).h(28).flex_none().px(collapsed ? 0 : 8).items_center().when(collapsed, el => el.justify_center()).text_size(12).text_color(t.dim).child(collapsed ? "…" : "Loading…");
     if (!remote.length) return loading(null) && !rows.length ? [loadingRow(null)] : rows.map(draw);
@@ -386,7 +413,7 @@ export default class Spaces extends View {
 
   row({ w, i, g, tree }, t) {
     const on = w.active;
-    const fromIndex = this.pressed === null ? -1 : spaces().findIndex(s => s.id === this.pressed);
+    const fromIndex = this.pressed === null ? -1 : this.own().findIndex(s => s.id === this.pressed);
     const colors = shared("space.colors") ?? {};
     const color = colors[w.id] ?? "ansi6";
     const fill = color.startsWith("#") ? color : (MARK[color] ?? t[color]);
@@ -424,7 +451,7 @@ export default class Spaces extends View {
         this.pressed = null;
         this.over = null;
         if (from !== null && over === w.id && from !== w.id) {
-          const index = spaces().findIndex(s => s.id === w.id);
+          const index = this.own().findIndex(s => s.id === w.id);
           if (index !== -1) run("space.move", { id: from, index: index + 1 });
         } else if (from === w.id) run("space.select", { id: w.id });
         cx.notify();

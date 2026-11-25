@@ -6,18 +6,19 @@ import { join } from "node:path";
 const source = (await readFile(new URL("../defaults/mods/spaces/main.js", import.meta.url), "utf8"))
   .replace(/^import .*;\n/gm, "").replace("export default class Spaces", "class Spaces").replace(/^export /gm, "");
 
-type Space = { id: string; folder: string; machine?: string | null };
+type Space = { id: string; folder: string; machine?: string | null; tabs?: { id: string }[] };
 function harness(replies: unknown[] = [], storage = new Map<string, string>(), snapshot: Space[] = [], execGit?: (...args: any[]) => Promise<unknown>) {
   const calls: string[][] = [];
   const tasks: Promise<unknown>[] = [];
   const availability = [{ name: null as string | null, layout: "ready" }];
+  const win = { name: "main", list: null as unknown[] | null };
   const moves: { id: string; index: number }[] = [];
   const handlers: Record<string, (...args: any[]) => void> = {};
   const element: any = new Proxy({}, { get: (_, method) => (...args: any[]) => {
     if (String(method).startsWith("on_")) handlers[String(method)] = args.at(-1);
     return element;
   } });
-  const Spaces = new Function("View", "hc", "localStorage", "spaces", "panes", "run", "v_flex", "h_flex", "div", "svg", "shared", "machines", "exec", `${source}; return Spaces;`)(
+  const Spaces = new Function("View", "hc", "localStorage", "spaces", "panes", "run", "v_flex", "h_flex", "div", "svg", "shared", "machines", "exec", "screens", "window", `${source}; return Spaces;`)(
     class {},
     async (args: string[]) => {
       calls.push(args);
@@ -32,13 +33,14 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
       moves.push(args);
     },
     ...Array(4).fill(() => element), () => null, () => availability, execGit,
+    () => win.list, () => ({ name: win.name, main: win.name === "main", active: true }),
   );
   const view = new Spaces();
   view.reconnecting = {};
   view.folded = new Set(["cloud"]);
   view.refreshMachines = () => {};
   const cx = { timer: { every() {} }, notify() {}, spawn(fn: (cx: unknown) => Promise<unknown>) { tasks.push(fn(cx)); } };
-  return { view, calls, tasks, cx, storage, moves, handlers, snapshot, availability };
+  return { view, calls, tasks, cx, storage, moves, handlers, snapshot, availability, win };
 }
 
 test("git grouping reads refs for normal, detached, unborn and bare worktrees", async () => {
@@ -331,4 +333,77 @@ test("no reconciliation without a rendered sidebar", () => {
   h.rows();
   h.flush();
   expect(h.order()).toEqual(["main", "topic"]);
+});
+
+// Herdr windows: screens() as the app gives it, main first.
+const screen = (name: string, spaces: string[] = [], tabs: string[] = [], open = true) =>
+  ({ name, main: name === "main", kind: name === "main" ? "listed" : "adhoc", open, focused: false, spaces, tabs });
+
+// The app's space.move with several windows (src/screens.rs place_among):
+// `index` counts the spaces window `own` shows, and only their slots change.
+function placeAmong(items: Space[], own: string[], id: string, index: number) {
+  const order = own.filter(o => o !== id);
+  order.splice(Math.min(index - 1, order.length), 0, id);
+  const slots = items.flatMap((s, i) => (s.id === id || own.includes(s.id) ? [i] : []));
+  if (slots.length !== order.length) return;
+  const byId = new Map(items.map(s => [s.id, s]));
+  slots.forEach((i, k) => { items[i] = byId.get(order[k])!; });
+}
+
+test("each window lists only the spaces it shows", () => {
+  const h = harness([], new Map(), [
+    { id: "a", folder: "/a", tabs: [{ id: "a1" }] },
+    { id: "b", folder: "/b", tabs: [{ id: "b1" }, { id: "b2" }] },
+    { id: "c", folder: "/c", tabs: [{ id: "c1" }] },
+    { id: "d", folder: "/d", tabs: [] },
+    { id: "e", folder: "/e", tabs: [{ id: "e1" }] },
+    { id: "f", folder: "/f", tabs: [{ id: "f1" }] },
+  ]);
+  const ids = () => h.view.own().map((s: Space) => s.id);
+  // Alone (or before screens() lists another open window), every space.
+  expect(ids()).toEqual(["a", "b", "c", "d", "e", "f"]);
+  h.win.list = [screen("main", ["a"]), screen("left", ["c", "d", "e"], ["b2"]), screen("gone", ["f"], [], false)];
+  // Main: its own, the one in no list, a closed window's, and b, whose b1 is still here.
+  expect(ids()).toEqual(["a", "b", "f"]);
+  h.win.name = "left";
+  // left: its own (d has no tabs) and b for its pulled-out b2.
+  expect(ids()).toEqual(["b", "c", "d", "e"]);
+  // A tab pulled out to a closed window shows where its space does.
+  h.win.list = [screen("main", ["a"]), screen("left", ["c", "d", "e"]), screen("gone", [], ["c1"], false)];
+  expect(ids()).toEqual(["c", "d", "e"]);
+  h.win.list = [screen("main"), screen("left", ["b"], ["a1"])];
+  // A space all of whose tabs are pulled out shows only there.
+  expect(ids()).toEqual(["a", "b"]);
+  h.win.name = "main";
+  expect(ids()).toEqual(["c", "d", "e", "f"]);
+});
+
+test("a window orders and numbers only its own spaces, by their positions among its own", () => {
+  const h = orderedHarness(["x", "topic", "a", "main", "y"]);
+  h.git("main", "repo", false);
+  h.git("topic", "repo", true);
+  h.win.list = [screen("main", ["a", "y"]), screen("left", ["x", "topic", "main"])];
+  // main's copy shows a and y in order and moves nothing of left's.
+  expect(h.rows().map((r: any) => [r.w.id, r.i])).toEqual([["a", 0], ["y", 1]]);
+  expect(h.moves).toEqual([]);
+  h.win.name = "left";
+  expect(h.rows().map((r: any) => r.w.id)).toEqual(["x", "main", "topic"]);
+  expect(h.moves).toEqual([{ id: "main", index: 2 }]);
+  const own = ["x", "topic", "main"];
+  for (const { id, index } of h.moves.splice(0)) placeAmong(h.snapshot, own, id, index);
+  expect(h.order()).toEqual(["x", "main", "a", "topic", "y"]);
+  expect(h.rows().map((r: any) => [r.w.id, r.i])).toEqual([["x", 0], ["main", 1], ["topic", 2]]);
+  expect(h.moves).toEqual([]);
+});
+
+test("a drop in a window gives space.move its position among that window's spaces", () => {
+  const h = orderedHarness(["a", "x", "b", "y"]);
+  h.win.list = [screen("main", ["a", "b"]), screen("left", ["x", "y"])];
+  h.win.name = "left";
+  const rows = h.rows();
+  h.view.pressed = "x";
+  h.view.over = "y";
+  h.view.row(rows.find((r: any) => r.w.id === "y"), {});
+  h.handlers.on_mouse_up({}, h.cx);
+  expect(h.moves).toEqual([{ id: "x", index: 2 }]);
 });
